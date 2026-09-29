@@ -11,13 +11,16 @@ try {
   }
 } catch { /* no .env */ }
 
-const { db, tx, getSetting, setSetting, intSetting, DEFAULT_SETTINGS } = require('./src/db');
-const auth = require('./src/auth');
-const odds = require('./src/odds');
-const bets = require('./src/bets');
+// Works whether the files sit in src/ and public/ folders or all in one folder.
+const SRC = fs.existsSync(path.join(__dirname, 'src', 'db.js')) ? './src/' : './';
+const { db, tx, getSetting, setSetting, intSetting } = require(SRC + 'db');
+const auth = require(SRC + 'auth');
+const odds = require(SRC + 'odds');
+const bets = require(SRC + 'bets');
 const { UserError } = bets;
 
-const PUBLIC = path.join(__dirname, 'public');
+const PUBLIC = fs.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
+const STATIC_FILES = new Set(['index.html', 'app.js', 'styles.css', 'icon.svg']);
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json' };
 
 // ---------- helpers ----------
@@ -327,9 +330,8 @@ async function handleApi(req, res, url) {
 }
 
 function serveStatic(req, res, url) {
-  let p = path.normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
-  let file = path.join(PUBLIC, p);
-  if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(PUBLIC, 'index.html');
+  const name = url.pathname.replace(/^\/+/, '');
+  const file = path.join(PUBLIC, STATIC_FILES.has(name) ? name : 'index.html');
   const ext = path.extname(file);
   res.writeHead(200, {
     'Content-Type': MIME[ext] || 'application/octet-stream',
