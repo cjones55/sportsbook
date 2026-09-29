@@ -1,6 +1,6 @@
 'use strict';
 const crypto = require('node:crypto');
-const { db } = require('./db');
+const { db, getSetting, setSetting } = require('./db');
 
 const SESSION_DAYS = 30;
 const COOKIE = 'sb_session';
@@ -86,14 +86,30 @@ function recordFailure(key) {
 function clearFailures(key) { failures.delete(key); }
 
 function ensureAdmin() {
-  const existing = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
-  if (existing) return;
   const username = process.env.ADMIN_USERNAME || 'admin';
-  let password = process.env.ADMIN_PASSWORD;
+  const envPassword = process.env.ADMIN_PASSWORD;
+  const existing = db.prepare("SELECT id, username FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").get();
+  if (existing) {
+    // ADMIN_USERNAME / ADMIN_PASSWORD are the way to recover the admin login on a host:
+    // when they change, apply them to the admin account once. Changes made in the app stick
+    // until the env values change again.
+    if (!envPassword) return;
+    const marker = crypto.createHash('sha256').update(`${username}\n${envPassword}`).digest('hex');
+    if (getSetting('admin_env_applied') === marker) return;
+    const taken = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(username, existing.id);
+    const newName = taken ? existing.username : username;
+    db.prepare('UPDATE users SET username = ?, pass_hash = ?, status = ? WHERE id = ?')
+      .run(newName, hashPassword(envPassword), 'active', existing.id);
+    setSetting('admin_env_applied', marker);
+    console.log(`Admin account "${newName}" password set from ADMIN_PASSWORD.`);
+    return;
+  }
+  let password = envPassword;
   let generated = false;
   if (!password) { password = crypto.randomBytes(9).toString('base64url'); generated = true; }
   db.prepare("INSERT INTO users(username, display_name, pass_hash, role) VALUES(?, ?, ?, 'admin')")
     .run(username, 'Bookie', hashPassword(password));
+  if (!generated) setSetting('admin_env_applied', crypto.createHash('sha256').update(`${username}\n${password}`).digest('hex'));
   console.log(`Created admin account "${username}".`);
   if (generated) console.log(`  Generated admin password: ${password}\n  (set ADMIN_PASSWORD to choose your own; change it after first login)`);
 }
