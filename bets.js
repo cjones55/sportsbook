@@ -1,0 +1,266 @@
+'use strict';
+const { db, tx, intSetting, getSetting } = require('./db');
+const odds = require('./odds');
+
+class UserError extends Error {
+  constructor(message, status = 400, extra) { super(message); this.status = status; this.extra = extra; }
+}
+
+function americanToDecimal(a) {
+  a = Number(a);
+  return a > 0 ? 1 + a / 100 : 1 + 100 / Math.abs(a);
+}
+function decimalToAmerican(d) {
+  return d >= 2 ? Math.round((d - 1) * 100) : Math.round(-100 / (d - 1));
+}
+
+// ---------- wallet ----------
+
+function applyTransaction(userId, amountCents, type, { betId = null, note = null, by = null } = {}) {
+  return tx(() => {
+    const u = db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(userId);
+    if (!u) throw new UserError('User not found', 404);
+    const after = u.balance_cents + amountCents;
+    db.prepare('UPDATE users SET balance_cents = ? WHERE id = ?').run(after, userId);
+    db.prepare(`INSERT INTO transactions(user_id, type, amount_cents, balance_after_cents, bet_id, note, created_by)
+      VALUES(?, ?, ?, ?, ?, ?, ?)`).run(userId, type, amountCents, after, betId, note, by);
+    return after;
+  });
+}
+
+// ---------- placing bets ----------
+
+function findOutcome(event, market, selection, point) {
+  const outs = event.markets[market];
+  if (!outs) return null;
+  return outs.find(o => o.name === selection && (market === 'h2h' || Number(o.point) === Number(point))) || null;
+}
+
+async function placeBet(user, body) {
+  if (getSetting('betting_open') !== '1') throw new UserError('Betting is currently closed.');
+  const type = body.type === 'parlay' ? 'parlay' : 'single';
+  const legsIn = Array.isArray(body.legs) ? body.legs : [];
+  const stake = Math.round(Number(body.stake) * 100);
+  if (!Number.isFinite(stake) || stake <= 0) throw new UserError('Enter a valid stake.');
+  if (type === 'single' && legsIn.length !== 1) throw new UserError('A straight bet has exactly one selection.');
+  if (type === 'parlay') {
+    if (legsIn.length < 2) throw new UserError('A parlay needs at least 2 selections.');
+    if (legsIn.length > intSetting('max_parlay_legs')) throw new UserError(`Parlays are limited to ${intSetting('max_parlay_legs')} selections.`);
+    const ids = new Set(legsIn.map(l => l.eventId));
+    if (ids.size !== legsIn.length) throw new UserError('A parlay can only include one selection per game.');
+  }
+
+  const minBet = intSetting('min_bet_cents');
+  const maxBet = user.max_bet_cents ?? intSetting('max_bet_cents');
+  if (stake < minBet) throw new UserError(`Minimum bet is $${(minBet / 100).toFixed(2)}.`);
+  if (maxBet && stake > maxBet) throw new UserError(`Maximum bet is $${(maxBet / 100).toFixed(2)}.`);
+
+  // Validate every leg against current odds.
+  const legs = [];
+  const changed = [];
+  const bySport = {};
+  for (const l of legsIn) {
+    if (!['h2h', 'spreads', 'totals'].includes(l.market)) throw new UserError('Unknown market.');
+    bySport[l.sportKey] = bySport[l.sportKey] || (await odds.getEvents(l.sportKey)).events;
+    const event = bySport[l.sportKey].find(e => e.id === l.eventId);
+    if (!event) throw new UserError('One of your games is no longer available.', 409);
+    if (Date.parse(event.commence_time) <= Date.now()) throw new UserError(`${event.away_team} @ ${event.home_team} has already started.`, 409);
+    const out = findOutcome(event, l.market, l.selection, l.point);
+    if (!out) { changed.push({ ...l, removed: true }); continue; }
+    if (Number(out.price) !== Number(l.price)) { changed.push({ ...l, price: out.price, point: out.point }); continue; }
+    legs.push({ event, market: l.market, selection: out.name, point: out.point, price: out.price });
+  }
+  if (changed.length) throw new UserError('Odds have changed. Review your bet slip and try again.', 409, { changed });
+
+  const dec = legs.reduce((acc, l) => acc * americanToDecimal(l.price), 1);
+  const payout = Math.floor(stake * dec);
+  const maxPayout = intSetting('max_payout_cents');
+  if (maxPayout && payout > maxPayout) throw new UserError(`Maximum payout is $${(maxPayout / 100).toFixed(2)}. Lower your stake.`);
+
+  return tx(() => {
+    const fresh = db.prepare('SELECT balance_cents, status FROM users WHERE id = ?').get(user.id);
+    if (fresh.status !== 'active') throw new UserError('Account is suspended.', 403);
+    if (fresh.balance_cents < stake) throw new UserError('Not enough credit for this bet.');
+    const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents)
+      VALUES(?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout);
+    const ins = db.prepare(`INSERT INTO bet_legs(bet_id, event_id, sport_key, sport_title, home_team, away_team, commence_time, market, selection, point, price)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const l of legs) {
+      ins.run(betId, l.event.id, l.event.sport_key, l.event.sport_title, l.event.home_team, l.event.away_team,
+        l.event.commence_time, l.market, l.selection, l.point, l.price);
+    }
+    applyTransaction(user.id, -stake, 'bet', { betId: Number(betId), note: `Bet #${betId}` });
+    return getBet(Number(betId));
+  });
+}
+
+// ---------- reading ----------
+
+function getBet(id) {
+  const bet = db.prepare('SELECT b.*, u.username FROM bets b JOIN users u ON u.id = b.user_id WHERE b.id = ?').get(id);
+  if (!bet) return null;
+  bet.legs = db.prepare('SELECT * FROM bet_legs WHERE bet_id = ? ORDER BY id').all(id);
+  return bet;
+}
+
+function listBets({ userId, status, limit = 200, offset = 0 } = {}) {
+  const where = [];
+  const args = [];
+  if (userId) { where.push('b.user_id = ?'); args.push(userId); }
+  if (status === 'open') where.push("b.status = 'pending'");
+  else if (status === 'settled') where.push("b.status != 'pending'");
+  else if (status) { where.push('b.status = ?'); args.push(status); }
+  const sql = `SELECT b.*, u.username FROM bets b JOIN users u ON u.id = b.user_id
+    ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY b.id DESC LIMIT ? OFFSET ?`;
+  const bets = db.prepare(sql).all(...args, limit, offset);
+  if (!bets.length) return bets;
+  const legs = db.prepare(`SELECT * FROM bet_legs WHERE bet_id IN (${bets.map(() => '?').join(',')}) ORDER BY id`)
+    .all(...bets.map(b => b.id));
+  for (const b of bets) b.legs = legs.filter(l => l.bet_id === b.id);
+  return bets;
+}
+
+// ---------- settlement ----------
+
+const FINAL = ['won', 'lost', 'push', 'void'];
+
+// Work out a bet's status and payout from its legs.
+function evaluate(bet, legs) {
+  if (bet.type === 'single') {
+    const s = legs[0].status;
+    if (s === 'pending') return { status: 'pending', payout: 0 };
+    if (s === 'won') return { status: 'won', payout: Math.floor(bet.stake_cents * americanToDecimal(legs[0].price)) };
+    if (s === 'lost') return { status: 'lost', payout: 0 };
+    return { status: s, payout: bet.stake_cents };
+  }
+  if (legs.some(l => l.status === 'lost')) return { status: 'lost', payout: 0 };
+  if (legs.some(l => l.status === 'pending')) return { status: 'pending', payout: 0 };
+  if (legs.every(l => l.status === 'void')) return { status: 'void', payout: bet.stake_cents };
+  const winners = legs.filter(l => l.status === 'won');
+  if (!winners.length) return { status: 'push', payout: bet.stake_cents };
+  const dec = winners.reduce((acc, l) => acc * americanToDecimal(l.price), 1);
+  return { status: 'won', payout: Math.floor(bet.stake_cents * dec) };
+}
+
+// Recompute a bet after a leg changed, and move credit by the difference from
+// whatever was paid before (so re-grading a settled bet corrects the balance).
+function refreshBet(betId, settledBy) {
+  return tx(() => {
+    const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+    const legs = db.prepare('SELECT * FROM bet_legs WHERE bet_id = ?').all(betId);
+    const { status, payout } = evaluate(bet, legs);
+    if (status === bet.status && payout === bet.payout_cents) return;
+    const delta = payout - bet.payout_cents;
+    db.prepare(`UPDATE bets SET status = ?, payout_cents = ?, settled_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
+      settled_by = ? WHERE id = ?`).run(status, payout, status, status === 'pending' ? null : settledBy, betId);
+    if (delta !== 0) {
+      const type = bet.status === 'pending' ? (status === 'won' ? 'payout' : 'refund') : 'regrade';
+      applyTransaction(bet.user_id, delta, type, { betId, note: `Bet #${betId} ${status}` });
+    }
+  });
+}
+
+function settleLeg(legId, status, { by = 'admin', note = null } = {}) {
+  if (!FINAL.includes(status) && status !== 'pending') throw new UserError('Invalid result.');
+  const leg = db.prepare('SELECT * FROM bet_legs WHERE id = ?').get(legId);
+  if (!leg) throw new UserError('Selection not found.', 404);
+  tx(() => {
+    db.prepare('UPDATE bet_legs SET status = ?, result_note = ? WHERE id = ?').run(status, note, legId);
+    refreshBet(leg.bet_id, by);
+  });
+  return getBet(leg.bet_id);
+}
+
+// Settle a whole bet in one step (all legs to the same result, e.g. void a bet).
+function settleBet(betId, status, { by = 'admin' } = {}) {
+  if (!FINAL.includes(status) && status !== 'pending') throw new UserError('Invalid result.');
+  const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
+  if (!bet) throw new UserError('Bet not found.', 404);
+  tx(() => {
+    db.prepare('UPDATE bet_legs SET status = ?, result_note = ? WHERE bet_id = ?').run(status, `Set by ${by}`, betId);
+    refreshBet(betId, by);
+  });
+  return getBet(betId);
+}
+
+function gradeLeg(leg, score) {
+  const mine = leg.selection === score.home_team ? score.home_score : leg.selection === score.away_team ? score.away_score : null;
+  const theirs = leg.selection === score.home_team ? score.away_score : score.home_score;
+  const note = `Final: ${score.away_team} ${score.away_score}, ${score.home_team} ${score.home_score}`;
+  if (leg.market === 'totals') {
+    const total = score.home_score + score.away_score;
+    if (total === leg.point) return { status: 'push', note };
+    const over = total > leg.point;
+    return { status: (leg.selection === 'Over') === over ? 'won' : 'lost', note };
+  }
+  if (mine === null) return null;
+  const adj = mine + (leg.market === 'spreads' ? Number(leg.point) : 0);
+  if (adj === theirs) return { status: 'push', note };
+  return { status: adj > theirs ? 'won' : 'lost', note };
+}
+
+// Pull final scores for sports with open bets and grade everything that finished.
+async function autoGrade({ force = false } = {}) {
+  if (!force && getSetting('auto_grade') !== '1') return { graded: 0, errors: [] };
+  const pending = db.prepare(`SELECT * FROM bet_legs WHERE status = 'pending' AND commence_time < ?`)
+    .all(new Date(Date.now() - 2 * 3600e3).toISOString());
+  if (!pending.length) return { graded: 0, errors: [] };
+  const errors = [];
+  const needScores = [...new Set(pending.filter(l => !l.event_id.startsWith('demo_')).map(l => l.sport_key))];
+  const have = new Set(db.prepare('SELECT event_id FROM scores WHERE completed = 1').all().map(r => r.event_id));
+  for (const sport of needScores) {
+    if (pending.filter(l => l.sport_key === sport).every(l => have.has(l.event_id))) continue;
+    try { await odds.fetchScores(sport); } catch (err) { errors.push(`${sport}: ${err.message}`); }
+  }
+  odds.mockScoresFor(pending);
+  let graded = 0;
+  const getScore = db.prepare('SELECT * FROM scores WHERE event_id = ? AND completed = 1');
+  for (const leg of pending) {
+    const score = getScore.get(leg.event_id);
+    if (!score) continue;
+    const g = gradeLeg(leg, score);
+    if (!g) continue;
+    settleLeg(leg.id, g.status, { by: 'auto', note: g.note });
+    graded++;
+  }
+  return { graded, errors };
+}
+
+// ---------- reporting ----------
+
+function summary() {
+  const q = (sql, ...a) => db.prepare(sql).get(...a);
+  const clients = q("SELECT COUNT(*) n, COALESCE(SUM(balance_cents),0) bal FROM users WHERE role = 'client'");
+  const open = q("SELECT COUNT(*) n, COALESCE(SUM(stake_cents),0) stake, COALESCE(SUM(potential_payout_cents),0) liability FROM bets WHERE status = 'pending'");
+  const settled = q("SELECT COUNT(*) n, COALESCE(SUM(stake_cents),0) stake, COALESCE(SUM(payout_cents),0) paid FROM bets WHERE status != 'pending'");
+  const today = q("SELECT COUNT(*) n, COALESCE(SUM(stake_cents),0) stake FROM bets WHERE created_at >= datetime('now','start of day')");
+  const week = q(`SELECT COALESCE(SUM(stake_cents),0) stake, COALESCE(SUM(payout_cents),0) paid FROM bets
+    WHERE status != 'pending' AND settled_at >= datetime('now','-7 days')`);
+  const stale = q(`SELECT COUNT(DISTINCT bet_id) n FROM bet_legs WHERE status = 'pending' AND commence_time < ?`,
+    new Date(Date.now() - 12 * 3600e3).toISOString());
+  return {
+    clients: clients.n, clientBalanceCents: clients.bal,
+    openBets: open.n, openStakeCents: open.stake, openLiabilityCents: open.liability,
+    settledBets: settled.n, handleCents: settled.stake, bookProfitCents: settled.stake - settled.paid,
+    todayBets: today.n, todayStakeCents: today.stake,
+    weekProfitCents: week.stake - week.paid,
+    needsGrading: stale.n,
+  };
+}
+
+// Open liability per game, so the bookie can see where the risk is.
+function exposure() {
+  return db.prepare(`
+    SELECT l.event_id, l.sport_title, l.home_team, l.away_team, l.commence_time, l.market, l.selection, l.point,
+      COUNT(*) bets, SUM(b.stake_cents) stake_cents,
+      SUM(CASE WHEN b.type = 'single' THEN b.potential_payout_cents ELSE 0 END) single_payout_cents
+    FROM bet_legs l JOIN bets b ON b.id = l.bet_id
+    WHERE b.status = 'pending' AND l.status = 'pending'
+    GROUP BY l.event_id, l.market, l.selection, l.point
+    ORDER BY l.commence_time, l.event_id`).all();
+}
+
+module.exports = {
+  UserError, americanToDecimal, decimalToAmerican, applyTransaction, placeBet, getBet, listBets,
+  settleLeg, settleBet, autoGrade, gradeLeg, evaluate, summary, exposure,
+};

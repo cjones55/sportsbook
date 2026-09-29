@@ -1,0 +1,14 @@
+{
+  "name": "sportsbook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Private credit-based sportsbook: clients place bets, the bookie manages everything from an admin panel.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server.js",
+    "test": "node --no-warnings=ExperimentalWarning --test test/flow.test.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
