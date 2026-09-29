@@ -102,6 +102,10 @@ function addColumn(table, column, type) {
 addColumn('bets', 'teaser_points', 'REAL');
 addColumn('bets', 'teaser_odds', 'TEXT');
 addColumn('bet_legs', 'orig_point', 'REAL');
+addColumn('users', 'freeplay_cents', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('transactions', 'wallet', "TEXT NOT NULL DEFAULT 'credit'");
+addColumn('bets', 'freeplay', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('bets', 'freeplay_back_cents', 'INTEGER NOT NULL DEFAULT 0');
 
 // Run fn inside a transaction; nested calls join the outer one.
 let depth = 0;

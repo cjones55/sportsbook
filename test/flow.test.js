@@ -263,3 +263,54 @@ test('admin can edit teaser payouts', async () => {
   const book = (await admin('GET', '/api/book')).body;
   assert.deepEqual(book.teaserOdds, { 6: { 2: -115, 3: 170 }, 6.5: {}, 7: {} });
 });
+
+test('free play', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const joe = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  const fp = () => db.prepare('SELECT freeplay_cents FROM users WHERE id = ?').get(joe.id).freeplay_cents;
+
+  const g = await admin('POST', `/api/admin/users/${joe.id}/credit`, { type: 'freeplay', amount: '50', note: 'promo' });
+  assert.equal(g.status, 200);
+  assert.equal(g.body.freeplayCents, 5000);
+  assert.equal((await admin('POST', `/api/admin/users/${joe.id}/credit`, { type: 'freeplay_remove', amount: '60' })).status, 400);
+
+  const [n1] = future('americanfootball_nfl');
+  const leg = pick(n1, 'spreads', 0);
+  const place = stake => bets.placeBet(joe, { type: 'single', stake, legs: [leg], freeplay: true });
+  const credit = balance(joe.id);
+
+  await assert.rejects(place(60), /Not enough free play/);
+  let b = await place(20);
+  assert.equal(b.freeplay, 1);
+  const profit = Math.floor(2000 * bets.americanToDecimal(leg.price)) - 2000;
+  assert.equal(b.potential_payout_cents, profit);
+  assert.equal(fp(), 3000);
+  assert.equal(balance(joe.id), credit);
+
+  // A win pays profit only, into credit.
+  b = await gradeAs(b, ['won']);
+  assert.equal(b.payout_cents, profit);
+  assert.equal(balance(joe.id), credit + profit);
+  assert.equal(fp(), 3000);
+
+  // A loss costs no credit.
+  await gradeAs(await place(10), ['lost']);
+  assert.equal(balance(joe.id), credit + profit);
+  assert.equal(fp(), 2000);
+
+  // A push gives the free play back.
+  b = await gradeAs(await place(10), ['push']);
+  assert.equal(b.status, 'push');
+  assert.equal(fp(), 2000);
+  assert.equal(balance(joe.id), credit + profit);
+
+  // Regrading the push to a win swaps the free play back for the profit.
+  await admin('POST', `/api/admin/legs/${b.legs[0].id}/settle`, { status: 'won' });
+  assert.equal(fp(), 1000);
+  assert.equal(balance(joe.id), credit + profit + Math.floor(1000 * bets.americanToDecimal(leg.price)) - 1000);
+
+  const ledger = (await admin('GET', '/api/admin/transactions')).body.transactions;
+  assert.ok(ledger.some(t => t.type === 'freeplay' && t.wallet === 'freeplay' && t.amount_cents === 5000));
+  assert.ok(ledger.some(t => t.type === 'bet' && t.wallet === 'freeplay'));
+});

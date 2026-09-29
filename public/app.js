@@ -96,7 +96,8 @@
         <div class="brand"><img src="/icon.svg" alt="">${esc(state.book.name)}</div>
         <nav class="nav">${links.map(([k, t]) => `<a href="#/${k}" class="${k === active ? 'on' : ''}">${t}</a>`).join('')}</nav>
         ${isAdmin ? `<div class="balance"><span>Admin</span><b>${esc(state.me.username)}</b></div>`
-          : `<div class="balance"><span>Credit</span><b id="bal">${money(state.me.balanceCents)}</b></div>`}
+          : `<div class="balance"><span>Credit</span><b id="bal">${money(state.me.balanceCents)}</b></div>
+            <div class="balance ${state.me.freeplayCents ? '' : 'hidden'}" id="fpBox"><span>Free play</span><b id="fpBal">${money(state.me.freeplayCents)}</b></div>`}
       </div></header>
       <main>${state.book.demoOdds && isAdmin ? `<div class="banner">Running on demo odds. Add your Odds API key in <a href="#/admin/settings">Settings</a> to switch to real lines.</div>` : ''}
       ${!state.book.bettingOpen ? `<div class="banner">Betting is paused right now.</div>` : ''}
@@ -104,10 +105,16 @@
     return $('#view');
   }
 
-  function setBalance(c) {
+  function setBalance(c, fp) {
     state.me.balanceCents = c;
     const b = $('#bal');
     if (b) b.textContent = money(c);
+    if (fp == null) return;
+    state.me.freeplayCents = fp;
+    const f = $('#fpBal');
+    if (f) f.textContent = money(fp);
+    const box = $('#fpBox');
+    if (box) box.classList.toggle('hidden', !fp);
   }
 
   // ---------- auth screen ----------
@@ -263,6 +270,9 @@
       return;
     }
     const mode = state.slipMode;
+    const fpAvail = state.me.freeplayCents > 0;
+    if (!fpAvail) state.useFreeplay = false;
+    const fp = state.useFreeplay;
     let totalStake = 0, totalWin = 0;
     const legsHtml = s.map((l, i) => {
       const st = parseFloat(l.stake) || 0;
@@ -294,14 +304,17 @@
       ${legsHtml}
       ${mode === 'parlay' || mode === 'teaser' ? `<div class="slip-total"><span>${s.length}-leg ${mode}</span><b class="num">${decToAm(parlayDec)}</b></div>
         <input type="number" inputmode="decimal" min="0" step="0.01" placeholder="Stake $" id="parlayStake" value="${esc(state.parlayStake || '')}">` : ''}
+      ${fpAvail ? `<label class="check"><input type="checkbox" id="useFp" ${fp ? 'checked' : ''}> Bet with free play (${money(state.me.freeplayCents)}). Wins pay profit only.</label>` : ''}
       <div class="slip-total"><span class="muted">Total stake</span><b id="slipStake">${money(Math.round(totalStake * 100))}</b></div>
-      <div class="slip-total"><span class="muted">Total payout</span><b id="slipWin" class="pos">${money(Math.floor(totalWin * 100))}</b></div>
+      <div class="slip-total"><span class="muted">Total payout</span><b id="slipWin" class="pos">${money(Math.floor(totalWin * 100) - (fp ? Math.round(totalStake * 100) : 0))}</b></div>
       <div class="error" id="slipErr"></div>
       <button class="btn primary" style="width:100%;padding:11px" id="placeBtn" ${state.placing ? 'disabled' : ''}>${state.placing ? 'Placing…' : 'Place bet' + (mode === 'single' && s.length > 1 ? 's' : '')}</button>
       <p class="muted small" style="margin:8px 0 0">Min ${money(state.book.minBetCents)} · Max ${money(state.me.maxBetCents ?? state.book.maxBetCents)} per bet</p>
     </div>`;
     $$('[data-rm]', el).forEach(b => b.onclick = () => { state.slip.splice(+b.dataset.rm, 1); saveSlip(); drawGames(); drawSlip(); });
     $$('[data-slipmode]', el).forEach(b => b.onclick = () => { state.slipMode = b.dataset.slipmode; drawSlip(); });
+    const fpBox = $('#useFp', el);
+    if (fpBox) fpBox.onchange = () => { state.useFreeplay = fpBox.checked; drawSlip(); };
     $$('[data-teaserpts]', el).forEach(b => b.onclick = () => { state.teaserPts = b.dataset.teaserpts; drawSlip(); });
     $('#slipClear', el).onclick = () => { state.slip = []; saveSlip(); drawGames(); drawSlip(); };
     $('#slipClose', el).onclick = () => { state.slipOpen = false; drawSlip(); };
@@ -322,7 +335,7 @@
       if (state.slipMode !== 'single') { ts = parseFloat(state.parlayStake) || 0; tw = ts * parlayDec; }
       else for (const l of state.slip) { const st = parseFloat(l.stake) || 0; ts += st; tw += st * dec(l.price); }
       $('#slipStake', el).textContent = money(Math.round(ts * 100));
-      $('#slipWin', el).textContent = money(Math.floor(tw * 100));
+      $('#slipWin', el).textContent = money(Math.floor(tw * 100) - (state.useFreeplay ? Math.round(ts * 100) : 0));
     }
   }
 
@@ -350,8 +363,8 @@
     const errors = [];
     for (const j of jobs) {
       try {
-        const r = await api('POST', '/api/bets', { type: j.type, stake: j.stake, legs: j.legs, teaserPoints: j.teaserPoints });
-        setBalance(r.balanceCents);
+        const r = await api('POST', '/api/bets', { type: j.type, stake: j.stake, legs: j.legs, teaserPoints: j.teaserPoints, freeplay: !!state.useFreeplay });
+        setBalance(r.balanceCents, r.freeplayCents);
         state.slip = state.slip.filter(s => !j.keys.includes(s.key));
         placed++;
       } catch (e) {
@@ -381,7 +394,7 @@
       </div></div>`).join('');
     const result = b.status === 'pending' ? `To pay <b>${money(b.potential_payout_cents)}</b>` : `Paid <b>${money(b.payout_cents)}</b>`;
     return `<div class="bet">
-      <div class="bet-head"><div><b>${esc(betName(b))}</b> <span class="muted small">#${b.id}${admin ? ` · <a href="#/admin/clients/${b.user_id}">${esc(b.username)}</a>` : ''} · ${esc(sqlTime(b.created_at))}</span></div>
+      <div class="bet-head"><div><b>${esc(betName(b))}</b>${b.freeplay ? ' <span class="pill">free play</span>' : ''} <span class="muted small">#${b.id}${admin ? ` · <a href="#/admin/clients/${b.user_id}">${esc(b.username)}</a>` : ''} · ${esc(sqlTime(b.created_at))}</span></div>
         <span class="pill ${b.status}">${b.status}</span></div>
       ${legs}
       <div class="bet-foot"><span>Stake <b>${money(b.stake_cents)}</b></span><span>Odds <b>${decToAm(b.decimal_odds)}</b></span><span>${result}</span>
@@ -436,12 +449,12 @@
     }
   }
 
-  const TX_LABEL = { deposit: 'Credit added', withdrawal: 'Credit removed', adjustment: 'Adjustment', bet: 'Bet placed', payout: 'Winnings', refund: 'Refund', regrade: 'Regrade' };
+  const TX_LABEL = { freeplay: 'Free play added', freeplay_remove: 'Free play removed', deposit: 'Credit added', withdrawal: 'Credit removed', adjustment: 'Adjustment', bet: 'Bet placed', payout: 'Winnings', refund: 'Refund', regrade: 'Regrade' };
   function txTable(rows, showUser) {
     if (!rows.length) return '<div class="muted">Nothing yet.</div>';
-    return `<table><thead><tr><th>When</th>${showUser ? '<th>Client</th>' : ''}<th>Type</th><th class="hide-sm">Note</th><th class="r">Amount</th><th class="r">Balance</th></tr></thead><tbody>
+    return `<table><thead><tr><th>When</th>${showUser ? '<th>Client</th>' : ''}<th>Type</th><th class="hide-sm">Note</th><th class="r">Amount</th><th class="r">Balance after</th></tr></thead><tbody>
       ${rows.map(t => `<tr><td class="small">${esc(sqlTime(t.created_at))}</td>${showUser ? `<td><a href="#/admin/clients/${t.user_id}">${esc(t.username)}</a></td>` : ''}
-        <td>${esc(TX_LABEL[t.type] || t.type)}</td><td class="hide-sm small muted">${esc(t.note || '')}</td>
+        <td>${esc(TX_LABEL[t.type] || t.type)}${t.wallet === 'freeplay' && !t.type.startsWith('freeplay') ? ' <span class="pill">free play</span>' : ''}</td><td class="hide-sm small muted">${esc(t.note || '')}</td>
         <td class="r num ${t.amount_cents >= 0 ? 'pos' : 'neg'}">${signedMoney(t.amount_cents)}</td><td class="r num">${money(t.balance_after_cents)}</td></tr>`).join('')}
     </tbody></table>`;
   }
@@ -457,7 +470,7 @@
         <div class="stat"><span>Last 7 days</span><b class="${s.weekProfitCents >= 0 ? 'pos' : 'neg'}">${signedMoney(s.weekProfitCents)}</b><small>book profit</small></div>
         <div class="stat"><span>Open bets</span><b>${s.openBets}</b><small>${money(s.openStakeCents)} staked</small></div>
         <div class="stat"><span>Max liability</span><b>${money(s.openLiabilityCents)}</b><small>if every open bet wins</small></div>
-        <div class="stat"><span>Clients</span><b>${s.clients}</b><small>${money(s.clientBalanceCents)} total credit</small></div>
+        <div class="stat"><span>Clients</span><b>${s.clients}</b><small>${money(s.clientBalanceCents)} total credit${s.clientFreeplayCents ? ` · ${money(s.clientFreeplayCents)} free play` : ''}</small></div>
         <div class="stat"><span>Today</span><b>${s.todayBets}</b><small>${money(s.todayStakeCents)} wagered</small></div>
       </div>
       ${s.needsGrading ? `<div class="banner">${s.needsGrading} open bet${s.needsGrading > 1 ? 's have' : ' has'} a game that started over 12 hours ago. <a href="#/admin/bets">Grade them</a>.</div>` : ''}
@@ -486,7 +499,7 @@
       const rows = users.filter(u => !q || u.username.toLowerCase().includes(q) || (u.displayName || '').toLowerCase().includes(q));
       $('#tbl', view).innerHTML = `<table><thead><tr><th>Client</th><th class="r">Credit</th><th class="r hide-sm">Open bets</th><th class="r hide-sm">Book P/L</th><th class="hide-sm">Last login</th></tr></thead><tbody>
         ${rows.map(u => `<tr class="click" data-u="${u.id}"><td><b>${esc(u.displayName || u.username)}</b> ${u.role === 'admin' ? '<span class="pill">admin</span>' : ''} ${u.status !== 'active' ? `<span class="pill suspended">${esc(u.status)}</span>` : ''}<div class="small muted">@${esc(u.username)}</div></td>
-          <td class="r num">${u.role === 'admin' ? '–' : money(u.balanceCents)}</td>
+          <td class="r num">${u.role === 'admin' ? '–' : money(u.balanceCents)}${u.freeplayCents ? `<div class="small muted">+${money(u.freeplayCents)} free play</div>` : ''}</td>
           <td class="r num hide-sm">${u.openBets ? `${u.openBets} · ${money(u.openStakeCents)}` : '–'}</td>
           <td class="r num hide-sm ${u.bookProfitCents >= 0 ? 'pos' : 'neg'}">${u.role === 'admin' ? '–' : signedMoney(u.bookProfitCents)}</td>
           <td class="small muted hide-sm">${esc(sqlTime(u.lastLoginAt) || 'Never')}</td></tr>`).join('')}
@@ -535,13 +548,13 @@
       <div class="row between"><h1 style="margin:0">${esc(u.displayName || u.username)} <span class="muted small">@${esc(u.username)}</span></h1>
         ${u.status !== 'active' ? '<span class="pill suspended">suspended</span>' : ''}</div>
       <div class="stats" style="margin-top:14px">
-        ${isClient ? `<div class="stat"><span>Credit</span><b>${money(u.balanceCents)}</b></div>` : ''}
+        ${isClient ? `<div class="stat"><span>Credit</span><b>${money(u.balanceCents)}</b></div><div class="stat"><span>Free play</span><b>${money(u.freeplayCents)}</b></div>` : ''}
         <div class="stat"><span>Max bet</span><b>${u.maxBetCents != null ? money(u.maxBetCents) : 'Default'}</b></div>
         <div class="stat"><span>Last login</span><b style="font-size:1rem">${esc(sqlTime(u.lastLoginAt) || 'Never')}</b></div>
       </div>
-      ${isClient ? `<div class="panel"><h3>Add or remove credit</h3>
+      ${isClient ? `<div class="panel"><h3>Add or remove credit or free play</h3>
         <form id="cr" class="row">
-          <select name="type" style="width:auto"><option value="deposit">Add credit</option><option value="withdrawal">Remove credit</option></select>
+          <select name="type" style="width:auto"><option value="deposit">Add credit</option><option value="withdrawal">Remove credit</option><option value="freeplay">Give free play</option><option value="freeplay_remove">Remove free play</option></select>
           <input type="number" name="amount" min="0.01" step="0.01" placeholder="Amount $" style="width:140px" required>
           <input type="text" name="note" placeholder="Note (optional)" class="grow" style="width:auto">
           <button class="btn primary">Apply</button></form></div>` : ''}
@@ -560,7 +573,7 @@
     const cr = $('#cr', view);
     if (cr) cr.onsubmit = async e => {
       e.preventDefault();
-      try { const r = await api('POST', `/api/admin/users/${id}/credit`, formData(e.target)); toast(`Balance is now ${money(r.balanceCents)}.`); reload(); }
+      try { const r = await api('POST', `/api/admin/users/${id}/credit`, formData(e.target)); toast(`Credit ${money(r.balanceCents)} · Free play ${money(r.freeplayCents)}.`); reload(); }
       catch (err) { toast(err.message, true); }
     };
     $('#acct', view).onsubmit = async e => {
@@ -736,7 +749,7 @@
   // Keep the balance fresh (bets get graded in the background).
   setInterval(async () => {
     if (!state.me || state.me.role !== 'client' || document.hidden) return;
-    try { const r = await api('GET', '/api/me'); setBalance(r.user.balanceCents); } catch { /* ignore */ }
+    try { const r = await api('GET', '/api/me'); setBalance(r.user.balanceCents, r.user.freeplayCents); } catch { /* ignore */ }
   }, 60e3);
   boot();
 })();

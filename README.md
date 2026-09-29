@@ -23,7 +23,7 @@ parlays or teasers (6, 6.5 or 7 points on football and basketball spreads and to
 
 **Admin**
 - Dashboard: book profit, open action, max liability, share link.
-- Clients: create logins, add or remove credit, per-client max bet, reset passwords, suspend, private notes.
+- Clients: create logins, add or remove credit, give free play (bets with it pay profit only; a push returns the free play), per-client max bet, reset passwords, suspend, private notes.
 - Bets: every bet; grade each pick Won / Lost / Push / Void by hand, or void a whole bet. Re-grading a settled bet corrects the client's credit automatically.
 - Risk: open action per game and side.
 - Ledger: every credit movement.

@@ -16,14 +16,16 @@ function decimalToAmerican(d) {
 
 // ---------- wallet ----------
 
-function applyTransaction(userId, amountCents, type, { betId = null, note = null, by = null } = {}) {
+// wallet is 'credit' (real balance) or 'freeplay' (bonus balance the admin hands out).
+function applyTransaction(userId, amountCents, type, { betId = null, note = null, by = null, wallet = 'credit' } = {}) {
+  const col = wallet === 'freeplay' ? 'freeplay_cents' : 'balance_cents';
   return tx(() => {
-    const u = db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(userId);
+    const u = db.prepare(`SELECT ${col} bal FROM users WHERE id = ?`).get(userId);
     if (!u) throw new UserError('User not found', 404);
-    const after = u.balance_cents + amountCents;
-    db.prepare('UPDATE users SET balance_cents = ? WHERE id = ?').run(after, userId);
-    db.prepare(`INSERT INTO transactions(user_id, type, amount_cents, balance_after_cents, bet_id, note, created_by)
-      VALUES(?, ?, ?, ?, ?, ?, ?)`).run(userId, type, amountCents, after, betId, note, by);
+    const after = u.bal + amountCents;
+    db.prepare(`UPDATE users SET ${col} = ? WHERE id = ?`).run(after, userId);
+    db.prepare(`INSERT INTO transactions(user_id, type, amount_cents, balance_after_cents, bet_id, note, created_by, wallet)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).run(userId, type, amountCents, after, betId, note, by, wallet);
     return after;
   });
 }
@@ -50,6 +52,7 @@ async function placeBet(user, body) {
   const type = ['parlay', 'teaser'].includes(body.type) ? body.type : 'single';
   const legsIn = Array.isArray(body.legs) ? body.legs : [];
   const stake = Math.round(Number(body.stake) * 100);
+  const freeplay = body.freeplay === true || body.freeplay === '1' || body.freeplay === 1;
   if (!Number.isFinite(stake) || stake <= 0) throw new UserError('Enter a valid stake.');
   if (type === 'single' && legsIn.length !== 1) throw new UserError('A straight bet has exactly one selection.');
   if (type === 'parlay') {
@@ -100,23 +103,25 @@ async function placeBet(user, body) {
   const dec = type === 'teaser'
     ? americanToDecimal(teaserRow[legs.length])
     : legs.reduce((acc, l) => acc * americanToDecimal(l.price), 1);
-  const payout = Math.floor(stake * dec);
+  // A free play win pays the profit only; the stake is not returned.
+  const payout = Math.floor(stake * dec) - (freeplay ? stake : 0);
   const maxPayout = intSetting('max_payout_cents');
   if (maxPayout && payout > maxPayout) throw new UserError(`Maximum payout is $${(maxPayout / 100).toFixed(2)}. Lower your stake.`);
 
   return tx(() => {
-    const fresh = db.prepare('SELECT balance_cents, status FROM users WHERE id = ?').get(user.id);
+    const fresh = db.prepare('SELECT balance_cents, freeplay_cents, status FROM users WHERE id = ?').get(user.id);
     if (fresh.status !== 'active') throw new UserError('Account is suspended.', 403);
-    if (fresh.balance_cents < stake) throw new UserError('Not enough credit for this bet.');
-    const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents, teaser_points, teaser_odds)
-      VALUES(?, ?, ?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout, teaserPts, teaserRow && JSON.stringify(teaserRow));
+    if (freeplay && fresh.freeplay_cents < stake) throw new UserError('Not enough free play for this bet.');
+    if (!freeplay && fresh.balance_cents < stake) throw new UserError('Not enough credit for this bet.');
+    const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents, teaser_points, teaser_odds, freeplay)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout, teaserPts, teaserRow && JSON.stringify(teaserRow), freeplay ? 1 : 0);
     const ins = db.prepare(`INSERT INTO bet_legs(bet_id, event_id, sport_key, sport_title, home_team, away_team, commence_time, market, selection, point, orig_point, price)
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     for (const l of legs) {
       ins.run(betId, l.event.id, l.event.sport_key, l.event.sport_title, l.event.home_team, l.event.away_team,
         l.event.commence_time, l.market, l.selection, l.point, type === 'teaser' ? l.origPoint : null, l.price);
     }
-    applyTransaction(user.id, -stake, 'bet', { betId: Number(betId), note: `Bet #${betId}` });
+    applyTransaction(user.id, -stake, 'bet', { betId: Number(betId), note: `Bet #${betId}`, wallet: freeplay ? 'freeplay' : 'credit' });
     return getBet(Number(betId));
   });
 }
@@ -176,21 +181,31 @@ function evaluate(bet, legs) {
   return { status: 'won', payout: Math.floor(bet.stake_cents * dec) };
 }
 
+// What a bet pays in credit (payout) and hands back as free play (back).
+// Free play bets: a win pays profit only, a push or void returns the free play.
+function outcome(bet, legs) {
+  const r = evaluate(bet, legs);
+  if (!bet.freeplay) return { ...r, back: 0 };
+  if (r.status === 'won') return { status: 'won', payout: Math.max(0, r.payout - bet.stake_cents), back: 0 };
+  if (r.status === 'push' || r.status === 'void') return { status: r.status, payout: 0, back: bet.stake_cents };
+  return { status: r.status, payout: 0, back: 0 };
+}
+
 // Recompute a bet after a leg changed, and move credit by the difference from
 // whatever was paid before (so re-grading a settled bet corrects the balance).
 function refreshBet(betId, settledBy) {
   return tx(() => {
     const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
     const legs = db.prepare('SELECT * FROM bet_legs WHERE bet_id = ?').all(betId);
-    const { status, payout } = evaluate(bet, legs);
-    if (status === bet.status && payout === bet.payout_cents) return;
+    const { status, payout, back } = outcome(bet, legs);
+    if (status === bet.status && payout === bet.payout_cents && back === bet.freeplay_back_cents) return;
     const delta = payout - bet.payout_cents;
-    db.prepare(`UPDATE bets SET status = ?, payout_cents = ?, settled_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
-      settled_by = ? WHERE id = ?`).run(status, payout, status, status === 'pending' ? null : settledBy, betId);
-    if (delta !== 0) {
-      const type = bet.status === 'pending' ? (status === 'won' ? 'payout' : 'refund') : 'regrade';
-      applyTransaction(bet.user_id, delta, type, { betId, note: `Bet #${betId} ${status}` });
-    }
+    const backDelta = back - bet.freeplay_back_cents;
+    db.prepare(`UPDATE bets SET status = ?, payout_cents = ?, freeplay_back_cents = ?, settled_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
+      settled_by = ? WHERE id = ?`).run(status, payout, back, status, status === 'pending' ? null : settledBy, betId);
+    const type = bet.status === 'pending' ? (status === 'won' ? 'payout' : 'refund') : 'regrade';
+    if (delta !== 0) applyTransaction(bet.user_id, delta, type, { betId, note: `Bet #${betId} ${status}` });
+    if (backDelta !== 0) applyTransaction(bet.user_id, backDelta, type, { betId, note: `Bet #${betId} ${status}`, wallet: 'freeplay' });
   });
 }
 
@@ -264,18 +279,20 @@ async function autoGrade({ force = false } = {}) {
 
 function summary() {
   const q = (sql, ...a) => db.prepare(sql).get(...a);
-  const clients = q("SELECT COUNT(*) n, COALESCE(SUM(balance_cents),0) bal FROM users WHERE role = 'client'");
+  const clients = q("SELECT COUNT(*) n, COALESCE(SUM(balance_cents),0) bal, COALESCE(SUM(freeplay_cents),0) fp FROM users WHERE role = 'client'");
   const open = q("SELECT COUNT(*) n, COALESCE(SUM(stake_cents),0) stake, COALESCE(SUM(potential_payout_cents),0) liability FROM bets WHERE status = 'pending'");
-  const settled = q("SELECT COUNT(*) n, COALESCE(SUM(stake_cents),0) stake, COALESCE(SUM(payout_cents),0) paid FROM bets WHERE status != 'pending'");
+  // Free play stakes are not real money, so they don't count toward the book's take.
+  const settled = q(`SELECT COUNT(*) n, COALESCE(SUM(stake_cents),0) stake, COALESCE(SUM(CASE WHEN freeplay = 1 THEN 0 ELSE stake_cents END),0) real,
+    COALESCE(SUM(payout_cents),0) paid FROM bets WHERE status != 'pending'`);
   const today = q("SELECT COUNT(*) n, COALESCE(SUM(stake_cents),0) stake FROM bets WHERE created_at >= datetime('now','start of day')");
-  const week = q(`SELECT COALESCE(SUM(stake_cents),0) stake, COALESCE(SUM(payout_cents),0) paid FROM bets
+  const week = q(`SELECT COALESCE(SUM(CASE WHEN freeplay = 1 THEN 0 ELSE stake_cents END),0) stake, COALESCE(SUM(payout_cents),0) paid FROM bets
     WHERE status != 'pending' AND settled_at >= datetime('now','-7 days')`);
   const stale = q(`SELECT COUNT(DISTINCT bet_id) n FROM bet_legs WHERE status = 'pending' AND commence_time < ?`,
     new Date(Date.now() - 12 * 3600e3).toISOString());
   return {
-    clients: clients.n, clientBalanceCents: clients.bal,
+    clients: clients.n, clientBalanceCents: clients.bal, clientFreeplayCents: clients.fp,
     openBets: open.n, openStakeCents: open.stake, openLiabilityCents: open.liability,
-    settledBets: settled.n, handleCents: settled.stake, bookProfitCents: settled.stake - settled.paid,
+    settledBets: settled.n, handleCents: settled.stake, bookProfitCents: settled.real - settled.paid,
     todayBets: today.n, todayStakeCents: today.stake,
     weekProfitCents: week.stake - week.paid,
     needsGrading: stale.n,
