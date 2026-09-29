@@ -95,7 +95,7 @@ route('POST', '/api/login', { auth: 'none' }, async (req, res, { body }) => {
   const username = String(body.username || '').trim();
   const key = `${req.socket.remoteAddress}|${username.toLowerCase()}`;
   if (auth.loginBlocked(key)) throw new UserError('Too many attempts. Try again in 15 minutes.', 429);
-  const u = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const u = db.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE ORDER BY username = ? DESC LIMIT 1').get(username, username);
   if (!u || !auth.verifyPassword(String(body.password || ''), u.pass_hash)) {
     auth.recordFailure(key);
     throw new UserError('Wrong username or password.', 401);

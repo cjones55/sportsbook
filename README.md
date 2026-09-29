@@ -14,7 +14,7 @@ npm start                 # http://localhost:3000
 npm test                  # API tests
 ```
 
-The first start creates the admin account from `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+The first start creates the admin account from `ADMIN_USERNAME` / `ADMIN_PASSWORD`. Changing either later (for example in Render > Environment) resets the admin login to the new values on the next start.
 
 ## What's in it
 
