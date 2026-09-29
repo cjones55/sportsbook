@@ -1,7 +1,7 @@
 # Sportsbook
 
 A private, credit-based sportsbook. The bookie shares one link; clients log in, see real
-lines (DraftKings first, via The Odds API), and place straight bets or parlays with their
+lines (DraftKings first, via The Odds API), and place straight bets, parlays or teasers with their
 credit. The admin login manages clients, credit, bets, grading and settings. All amounts are USD credit.
 
 No dependencies: Node 22.5+ and its built-in SQLite.
@@ -18,16 +18,16 @@ The first start creates the admin account from `ADMIN_USERNAME` / `ADMIN_PASSWOR
 
 ## What's in it
 
-**Clients**: odds board by sport (spread, moneyline, total), bet slip with straight bets or
-parlays, open and settled bets, credit history, password change. Works on phones.
+**Clients**: odds board by sport (spread, moneyline, total), bet slip with straight bets,
+parlays or teasers (6, 6.5 or 7 points on football and basketball spreads and totals, 2 to 6 legs), open and settled bets, credit history, password change. Works on phones.
 
 **Admin**
 - Dashboard: book profit, open action, max liability, share link.
-- Clients: create logins, add or remove credit, per-client max bet, reset passwords, suspend, private notes.
+- Clients: create logins, add or remove credit, give free play (bets with it pay profit only; a push returns the free play), per-client max bet, reset passwords, suspend, private notes.
 - Bets: every bet; grade each pick Won / Lost / Push / Void by hand, or void a whole bet. Re-grading a settled bet corrects the client's credit automatically.
 - Risk: open action per game and side.
 - Ledger: every credit movement.
-- Settings: book name, pause betting, min/max bet, max payout, parlay size, self sign-up with invite code, odds API key, which sports show.
+- Settings: book name, pause betting, min/max bet, max payout, parlay size, teaser payout table, self sign-up with invite code, odds API key, which sports show.
 
 **Odds**: [The Odds API](https://the-odds-api.com) supplies lines from DraftKings, FanDuel,
 BetMGM, Caesars and BetRivers (preference order is editable). Without a key the book runs on demo

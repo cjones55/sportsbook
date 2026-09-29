@@ -13,7 +13,7 @@ try {
 
 // Works whether the files sit in src/ and public/ folders or all in one folder.
 const SRC = fs.existsSync(path.join(__dirname, 'src', 'db.js')) ? './src/' : './';
-const { db, tx, getSetting, setSetting, intSetting } = require(SRC + 'db');
+const { db, tx, getSetting, setSetting, intSetting, teaserOdds } = require(SRC + 'db');
 const auth = require(SRC + 'auth');
 const odds = require(SRC + 'odds');
 const bets = require(SRC + 'bets');
@@ -58,7 +58,7 @@ const cents = v => {
 function publicUser(u) {
   return {
     id: u.id, username: u.username, displayName: u.display_name, role: u.role, status: u.status,
-    balanceCents: u.balance_cents, maxBetCents: u.max_bet_cents, notes: u.role === 'admin' ? undefined : u.notes,
+    balanceCents: u.balance_cents, freeplayCents: u.freeplay_cents, maxBetCents: u.max_bet_cents, notes: u.role === 'admin' ? undefined : u.notes,
     createdAt: u.created_at, lastLoginAt: u.last_login_at,
   };
 }
@@ -73,6 +73,7 @@ function bookInfo() {
     maxBetCents: intSetting('max_bet_cents'),
     maxPayoutCents: intSetting('max_payout_cents'),
     maxParlayLegs: intSetting('max_parlay_legs'),
+    teaserOdds: teaserOdds(),
     demoOdds: !odds.isLive(),
   };
 }
@@ -155,8 +156,8 @@ route('GET', '/api/odds/:sport', async (req, res, { params }) => {
 route('POST', '/api/bets', async (req, res, { user, body }) => {
   if (user.role !== 'client') throw new UserError('Admin accounts cannot place bets. Log in as a client.', 403);
   const bet = await bets.placeBet(user, body);
-  const balance = db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(user.id).balance_cents;
-  return { bet, balanceCents: balance };
+  const u = db.prepare('SELECT balance_cents, freeplay_cents FROM users WHERE id = ?').get(user.id);
+  return { bet, balanceCents: u.balance_cents, freeplayCents: u.freeplay_cents };
 });
 
 route('GET', '/api/bets', (req, res, { user, query }) => ({
@@ -179,7 +180,7 @@ route('GET', '/api/admin/users', { auth: 'admin' }, () => ({
   users: db.prepare(`SELECT u.*,
       (SELECT COUNT(*) FROM bets b WHERE b.user_id = u.id AND b.status = 'pending') open_bets,
       (SELECT COALESCE(SUM(stake_cents),0) FROM bets b WHERE b.user_id = u.id AND b.status = 'pending') open_stake,
-      (SELECT COALESCE(SUM(stake_cents - payout_cents),0) FROM bets b WHERE b.user_id = u.id AND b.status != 'pending') book_profit
+      (SELECT COALESCE(SUM(CASE WHEN freeplay = 1 THEN 0 ELSE stake_cents END - payout_cents),0) FROM bets b WHERE b.user_id = u.id AND b.status != 'pending') book_profit
     FROM users u ORDER BY u.role, u.username COLLATE NOCASE`).all()
     .map(u => ({ ...adminUserView(u), openBets: u.open_bets, openStakeCents: u.open_stake, bookProfitCents: u.book_profit })),
 }));
@@ -236,10 +237,18 @@ route('POST', '/api/admin/users/:id/credit', { auth: 'admin' }, (req, res, { use
   if (!u) throw new UserError('User not found', 404);
   const amount = cents(body.amount);
   if (amount === 0) throw new UserError('Amount cannot be zero.');
-  const type = ['deposit', 'withdrawal', 'adjustment'].includes(body.type) ? body.type : (amount > 0 ? 'deposit' : 'withdrawal');
-  const signed = type === 'withdrawal' ? -Math.abs(amount) : type === 'deposit' ? Math.abs(amount) : amount;
-  const after = bets.applyTransaction(u.id, signed, type, { note: body.note ? String(body.note).slice(0, 200) : null, by: user.id });
-  return { balanceCents: after };
+  const note = body.note ? String(body.note).slice(0, 200) : null;
+  if (body.type === 'freeplay' || body.type === 'freeplay_remove') {
+    const signed = body.type === 'freeplay' ? Math.abs(amount) : -Math.abs(amount);
+    if (u.freeplay_cents + signed < 0) throw new UserError(`${u.username} only has $${(u.freeplay_cents / 100).toFixed(2)} of free play.`);
+    bets.applyTransaction(u.id, signed, body.type, { note, by: user.id, wallet: 'freeplay' });
+  } else {
+    const type = ['deposit', 'withdrawal', 'adjustment'].includes(body.type) ? body.type : (amount > 0 ? 'deposit' : 'withdrawal');
+    const signed = type === 'withdrawal' ? -Math.abs(amount) : type === 'deposit' ? Math.abs(amount) : amount;
+    bets.applyTransaction(u.id, signed, type, { note, by: user.id });
+  }
+  const after = db.prepare('SELECT balance_cents, freeplay_cents FROM users WHERE id = ?').get(u.id);
+  return { balanceCents: after.balance_cents, freeplayCents: after.freeplay_cents };
 });
 
 route('GET', '/api/admin/bets', { auth: 'admin' }, (req, res, { query }) => ({
@@ -267,7 +276,26 @@ route('GET', '/api/admin/transactions', { auth: 'admin' }, (req, res, { query })
 
 const EDITABLE = ['book_name', 'betting_open', 'signup_enabled', 'signup_code', 'signup_starting_credit_cents',
   'min_bet_cents', 'max_bet_cents', 'max_payout_cents', 'max_parlay_legs', 'odds_api_key', 'odds_ttl_minutes',
-  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade'];
+  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds'];
+
+// Accepts {"6": {"2": -110, "3": 180, ...}, "6.5": {...}, "7": {...}}.
+function cleanTeaserOdds(v) {
+  let t;
+  try { t = typeof v === 'string' ? JSON.parse(v) : v; } catch { t = null; }
+  if (!t || typeof t !== 'object') throw new UserError('Invalid teaser payouts.');
+  const out = {};
+  for (const size of ['6', '6.5', '7']) {
+    out[size] = {};
+    for (const legs of ['2', '3', '4', '5', '6']) {
+      const raw = t[size] && t[size][legs];
+      if (raw === '' || raw == null) continue;
+      const n = Math.round(Number(raw));
+      if (!Number.isFinite(n) || Math.abs(n) < 100) throw new UserError(`Teaser payout for ${legs} legs at ${size} points must be American odds like -110 or +180.`);
+      out[size][legs] = n;
+    }
+  }
+  return JSON.stringify(out);
+}
 
 route('GET', '/api/admin/settings', { auth: 'admin' }, async () => {
   const settings = {};
@@ -287,6 +315,7 @@ route('PATCH', '/api/admin/settings', { auth: 'admin' }, (req, res, { body }) =>
   for (const [k, v] of Object.entries(body)) {
     if (!EDITABLE.includes(k)) continue;
     if (k === 'odds_api_key' && typeof v === 'string' && v.includes('…')) continue; // masked value echoed back
+    if (k === 'teaser_odds') { setSetting(k, cleanTeaserOdds(v)); continue; }
     if (k.endsWith('_cents') || ['max_parlay_legs', 'odds_ttl_minutes', 'odds_quota_floor'].includes(k)) {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0) throw new UserError(`Invalid value for ${k}`);

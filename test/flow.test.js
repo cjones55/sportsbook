@@ -139,3 +139,178 @@ test('demo games get graded after they finish', async () => {
   assert.equal(r.graded, pending);
   assert.notEqual(bets.getBet(placed.id).status, 'pending');
 });
+
+// Give each leg of a bet a final score that makes it win, lose or push, then run the grader.
+async function gradeAs(bet, outcomes) {
+  const put = db.prepare(`INSERT OR REPLACE INTO scores(event_id, sport_key, home_team, away_team, home_score, away_score, completed, updated_at)
+    VALUES(?, ?, ?, ?, ?, ?, 1, ?)`);
+  bet.legs.forEach((leg, i) => {
+    const o = outcomes[i];
+    const id = `test_${leg.id}`;
+    let home, away;
+    if (leg.market === 'totals') {
+      const total = o === 'push' ? leg.point : (leg.selection === 'Over') === (o === 'won') ? leg.point + 1.5 : leg.point - 1.5;
+      away = 20; home = total - 20;
+    } else {
+      const mine = 20 - (leg.market === 'spreads' ? leg.point : 0) + (o === 'won' ? 1.5 : o === 'lost' ? -1.5 : 0);
+      if (leg.selection === leg.home_team) { home = mine; away = 20; } else { away = mine; home = 20; }
+    }
+    db.prepare('UPDATE bet_legs SET event_id = ?, commence_time = ? WHERE id = ?').run(id, new Date(Date.now() - 5 * 3600e3).toISOString(), leg.id);
+    put.run(id, leg.sport_key, leg.home_team, leg.away_team, home, away, Date.now());
+  });
+  await bets.autoGrade({ force: true });
+  return bets.getBet(bet.id);
+}
+
+function pick(ev, market, side = 0) {
+  const o = ev.markets[market][side];
+  return { eventId: ev.id, sportKey: ev.sport_key, market, selection: o.name, point: o.point, price: o.price };
+}
+const future = key => require('../src/odds')._mockEvents(key).filter(e => Date.parse(e.commence_time) > Date.now());
+const balance = id => db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(id).balance_cents;
+
+test('parlays are auto-graded with wins, losses and pushes', async () => {
+  const joe = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  bets.applyTransaction(joe.id, 100000, 'deposit');
+  const [n1, n2] = future('americanfootball_nfl');
+  const [b1] = future('basketball_nba');
+  const legs = [pick(n1, 'h2h'), pick(n2, 'spreads', 1), pick(b1, 'totals')];
+  const place = () => bets.placeBet(joe, { type: 'parlay', stake: 20, legs });
+  const dec = legs.reduce((a, l) => a * bets.americanToDecimal(l.price), 1);
+
+  let before = balance(joe.id);
+  let b = await place();
+  assert.equal(b.potential_payout_cents, Math.floor(2000 * dec));
+  assert.equal(balance(joe.id), before - 2000);
+  b = await gradeAs(b, ['won', 'won', 'won']);
+  assert.equal(b.status, 'won');
+  assert.equal(b.payout_cents, Math.floor(2000 * dec));
+  assert.equal(balance(joe.id), before - 2000 + b.payout_cents);
+
+  before = balance(joe.id);
+  b = await gradeAs(await place(), ['won', 'push', 'won']);
+  assert.equal(b.status, 'won');
+  assert.equal(b.payout_cents, Math.floor(2000 * bets.americanToDecimal(legs[0].price) * bets.americanToDecimal(legs[2].price)));
+  assert.equal(balance(joe.id), before - 2000 + b.payout_cents);
+
+  before = balance(joe.id);
+  b = await gradeAs(await place(), ['won', 'lost', 'won']);
+  assert.equal(b.status, 'lost');
+  assert.equal(balance(joe.id), before - 2000);
+
+  before = balance(joe.id);
+  b = await gradeAs(await place(), ['push', 'push', 'push']);
+  assert.equal(b.status, 'push');
+  assert.equal(balance(joe.id), before);
+});
+
+test('teasers', async () => {
+  const joe = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  const [n1, n2] = future('americanfootball_nfl');
+  const [b1, b2] = future('basketball_nba');
+  const [c1] = future('americanfootball_ncaaf');
+  const [m1] = future('baseball_mlb');
+  const legs = [pick(n1, 'spreads', 0), pick(b1, 'totals', 0), pick(c1, 'totals', 1)];
+  const tease = (body) => bets.placeBet(joe, { type: 'teaser', stake: 10, teaserPoints: 6, legs, ...body });
+
+  await assert.rejects(tease({ legs: [pick(n1, 'spreads'), pick(m1, 'spreads')] }), /football and basketball/);
+  await assert.rejects(tease({ legs: [pick(n1, 'h2h'), pick(b1, 'spreads')] }), /spreads and totals/);
+  await assert.rejects(tease({ legs: [pick(n1, 'spreads')] }), /at least 2/);
+  await assert.rejects(tease({ teaserPoints: 5 }), /6, 6.5 or 7/);
+  await assert.rejects(tease({ legs: [pick(n1, 'spreads'), pick(n1, 'totals')] }), /one selection per game/);
+
+  const before = balance(joe.id);
+  let b = await tease();
+  assert.equal(b.type, 'teaser');
+  assert.equal(b.teaser_points, 6);
+  assert.equal(b.potential_payout_cents, Math.floor(1000 * bets.americanToDecimal(180)));
+  assert.equal(balance(joe.id), before - 1000);
+  // Lines move 6 points toward the bettor: spread +6, Over -6, Under +6.
+  assert.equal(b.legs[0].point, legs[0].point + 6);
+  assert.equal(b.legs[0].orig_point, legs[0].point);
+  assert.equal(b.legs[1].point, legs[1].point - 6);
+  assert.equal(b.legs[2].point, legs[2].point + 6);
+
+  // Editing the payout table later does not change a bet already placed.
+  const { setSetting, DEFAULT_SETTINGS } = require('../src/db');
+  setSetting('teaser_odds', JSON.stringify({ 6: { 2: -200, 3: 100 } }));
+  b = await gradeAs(b, ['won', 'won', 'won']);
+  setSetting('teaser_odds', DEFAULT_SETTINGS.teaser_odds);
+  assert.equal(b.status, 'won');
+  assert.equal(b.payout_cents, Math.floor(1000 * bets.americanToDecimal(180)));
+
+  // A push drops the leg: 3 legs with a push pays as a 2-leg teaser.
+  b = await gradeAs(await tease(), ['won', 'push', 'won']);
+  assert.equal(b.status, 'won');
+  assert.equal(b.payout_cents, Math.floor(1000 * bets.americanToDecimal(-110)));
+
+  b = await gradeAs(await tease(), ['won', 'lost', 'won']);
+  assert.equal(b.status, 'lost');
+  assert.equal(b.payout_cents, 0);
+
+  // A 2-leg teaser with a push is refunded.
+  const mid = balance(joe.id);
+  b = await gradeAs(await tease({ teaserPoints: 7, legs: [pick(n2, 'spreads', 1), pick(b2, 'totals', 1)] }), ['won', 'push']);
+  assert.equal(b.status, 'push');
+  assert.equal(balance(joe.id), mid);
+});
+
+test('admin can edit teaser payouts', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  assert.equal((await admin('PATCH', '/api/admin/settings', { teaser_odds: { 6: { 2: '50' } } })).status, 400);
+  assert.equal((await admin('PATCH', '/api/admin/settings', { teaser_odds: { 6: { 2: '-115', 3: '170' }, 6.5: {}, 7: { 2: '' } } })).status, 200);
+  const book = (await admin('GET', '/api/book')).body;
+  assert.deepEqual(book.teaserOdds, { 6: { 2: -115, 3: 170 }, 6.5: {}, 7: {} });
+});
+
+test('free play', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const joe = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  const fp = () => db.prepare('SELECT freeplay_cents FROM users WHERE id = ?').get(joe.id).freeplay_cents;
+
+  const g = await admin('POST', `/api/admin/users/${joe.id}/credit`, { type: 'freeplay', amount: '50', note: 'promo' });
+  assert.equal(g.status, 200);
+  assert.equal(g.body.freeplayCents, 5000);
+  assert.equal((await admin('POST', `/api/admin/users/${joe.id}/credit`, { type: 'freeplay_remove', amount: '60' })).status, 400);
+
+  const [n1] = future('americanfootball_nfl');
+  const leg = pick(n1, 'spreads', 0);
+  const place = stake => bets.placeBet(joe, { type: 'single', stake, legs: [leg], freeplay: true });
+  const credit = balance(joe.id);
+
+  await assert.rejects(place(60), /Not enough free play/);
+  let b = await place(20);
+  assert.equal(b.freeplay, 1);
+  const profit = Math.floor(2000 * bets.americanToDecimal(leg.price)) - 2000;
+  assert.equal(b.potential_payout_cents, profit);
+  assert.equal(fp(), 3000);
+  assert.equal(balance(joe.id), credit);
+
+  // A win pays profit only, into credit.
+  b = await gradeAs(b, ['won']);
+  assert.equal(b.payout_cents, profit);
+  assert.equal(balance(joe.id), credit + profit);
+  assert.equal(fp(), 3000);
+
+  // A loss costs no credit.
+  await gradeAs(await place(10), ['lost']);
+  assert.equal(balance(joe.id), credit + profit);
+  assert.equal(fp(), 2000);
+
+  // A push gives the free play back.
+  b = await gradeAs(await place(10), ['push']);
+  assert.equal(b.status, 'push');
+  assert.equal(fp(), 2000);
+  assert.equal(balance(joe.id), credit + profit);
+
+  // Regrading the push to a win swaps the free play back for the profit.
+  await admin('POST', `/api/admin/legs/${b.legs[0].id}/settle`, { status: 'won' });
+  assert.equal(fp(), 1000);
+  assert.equal(balance(joe.id), credit + profit + Math.floor(1000 * bets.americanToDecimal(leg.price)) - 1000);
+
+  const ledger = (await admin('GET', '/api/admin/transactions')).body.transactions;
+  assert.ok(ledger.some(t => t.type === 'freeplay' && t.wallet === 'freeplay' && t.amount_cents === 5000));
+  assert.ok(ledger.some(t => t.type === 'bet' && t.wallet === 'freeplay'));
+});
