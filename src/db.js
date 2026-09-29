@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS scores (
 );
 `);
 
+// Columns added after the first release; older databases get them on start.
+function addColumn(table, column, type) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+addColumn('bets', 'teaser_points', 'REAL');
+addColumn('bets', 'teaser_odds', 'TEXT');
+addColumn('bet_legs', 'orig_point', 'REAL');
+
 // Run fn inside a transaction; nested calls join the outer one.
 let depth = 0;
 function tx(fn) {
@@ -129,6 +137,12 @@ const DEFAULT_SETTINGS = {
   bookmakers: 'draftkings,fanduel,betmgm,williamhill_us,betrivers',
   enabled_sports: '',
   auto_grade: '1',
+  // American odds a teaser pays, by teaser size and number of winning legs.
+  teaser_odds: JSON.stringify({
+    6: { 2: -110, 3: 180, 4: 300, 5: 450, 6: 600 },
+    6.5: { 2: -120, 3: 160, 4: 250, 5: 400, 6: 500 },
+    7: { 2: -130, 3: 140, 4: 200, 5: 325, 6: 450 },
+  }),
 };
 
 function getSetting(key) {
@@ -144,4 +158,8 @@ function intSetting(key) {
   return parseInt(getSetting(key), 10) || 0;
 }
 
-module.exports = { db, tx, getSetting, setSetting, intSetting, DEFAULT_SETTINGS, DATA_DIR };
+function teaserOdds() {
+  try { return JSON.parse(getSetting('teaser_odds')); } catch { return JSON.parse(DEFAULT_SETTINGS.teaser_odds); }
+}
+
+module.exports = { db, tx, getSetting, setSetting, intSetting, teaserOdds, DEFAULT_SETTINGS, DATA_DIR };

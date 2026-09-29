@@ -1,5 +1,5 @@
 'use strict';
-const { db, tx, intSetting, getSetting } = require('./db');
+const { db, tx, intSetting, getSetting, teaserOdds } = require('./db');
 const odds = require('./odds');
 
 class UserError extends Error {
@@ -30,6 +30,15 @@ function applyTransaction(userId, amountCents, type, { betId = null, note = null
 
 // ---------- placing bets ----------
 
+const TEASER_SPORTS = ['americanfootball_', 'basketball_'];
+const TEASER_POINTS = [6, 6.5, 7];
+
+// Move a line in the bettor's favor by the teaser points.
+function teasePoint(market, selection, point, pts) {
+  if (market === 'totals') return selection === 'Over' ? Number(point) - pts : Number(point) + pts;
+  return Number(point) + pts;
+}
+
 function findOutcome(event, market, selection, point) {
   const outs = event.markets[market];
   if (!outs) return null;
@@ -38,7 +47,7 @@ function findOutcome(event, market, selection, point) {
 
 async function placeBet(user, body) {
   if (getSetting('betting_open') !== '1') throw new UserError('Betting is currently closed.');
-  const type = body.type === 'parlay' ? 'parlay' : 'single';
+  const type = ['parlay', 'teaser'].includes(body.type) ? body.type : 'single';
   const legsIn = Array.isArray(body.legs) ? body.legs : [];
   const stake = Math.round(Number(body.stake) * 100);
   if (!Number.isFinite(stake) || stake <= 0) throw new UserError('Enter a valid stake.');
@@ -48,6 +57,20 @@ async function placeBet(user, body) {
     if (legsIn.length > intSetting('max_parlay_legs')) throw new UserError(`Parlays are limited to ${intSetting('max_parlay_legs')} selections.`);
     const ids = new Set(legsIn.map(l => l.eventId));
     if (ids.size !== legsIn.length) throw new UserError('A parlay can only include one selection per game.');
+  }
+  let teaserPts = null, teaserRow = null;
+  if (type === 'teaser') {
+    teaserPts = Number(body.teaserPoints);
+    teaserRow = teaserOdds()[teaserPts];
+    if (!TEASER_POINTS.includes(teaserPts) || !teaserRow) throw new UserError('Pick a 6, 6.5 or 7 point teaser.');
+    const maxLegs = Math.max(...Object.keys(teaserRow).map(Number));
+    if (legsIn.length < 2) throw new UserError('A teaser needs at least 2 selections.');
+    if (legsIn.length > maxLegs || !teaserRow[legsIn.length]) throw new UserError(`Teasers are limited to ${maxLegs} selections.`);
+    if (new Set(legsIn.map(l => l.eventId)).size !== legsIn.length) throw new UserError('A teaser can only include one selection per game.');
+    for (const l of legsIn) {
+      if (!['spreads', 'totals'].includes(l.market)) throw new UserError('Teasers are spreads and totals only.');
+      if (!TEASER_SPORTS.some(p => String(l.sportKey).startsWith(p))) throw new UserError('Teasers are football and basketball only.');
+    }
   }
 
   const minBet = intSetting('min_bet_cents');
@@ -67,12 +90,16 @@ async function placeBet(user, body) {
     if (Date.parse(event.commence_time) <= Date.now()) throw new UserError(`${event.away_team} @ ${event.home_team} has already started.`, 409);
     const out = findOutcome(event, l.market, l.selection, l.point);
     if (!out) { changed.push({ ...l, removed: true }); continue; }
-    if (Number(out.price) !== Number(l.price)) { changed.push({ ...l, price: out.price, point: out.point }); continue; }
-    legs.push({ event, market: l.market, selection: out.name, point: out.point, price: out.price });
+    // A teaser pays from the table, so only the line matters, not the price.
+    if (type !== 'teaser' && Number(out.price) !== Number(l.price)) { changed.push({ ...l, price: out.price, point: out.point }); continue; }
+    const point = type === 'teaser' ? teasePoint(l.market, out.name, out.point, teaserPts) : out.point;
+    legs.push({ event, market: l.market, selection: out.name, point, origPoint: out.point, price: out.price });
   }
   if (changed.length) throw new UserError('Odds have changed. Review your bet slip and try again.', 409, { changed });
 
-  const dec = legs.reduce((acc, l) => acc * americanToDecimal(l.price), 1);
+  const dec = type === 'teaser'
+    ? americanToDecimal(teaserRow[legs.length])
+    : legs.reduce((acc, l) => acc * americanToDecimal(l.price), 1);
   const payout = Math.floor(stake * dec);
   const maxPayout = intSetting('max_payout_cents');
   if (maxPayout && payout > maxPayout) throw new UserError(`Maximum payout is $${(maxPayout / 100).toFixed(2)}. Lower your stake.`);
@@ -81,13 +108,13 @@ async function placeBet(user, body) {
     const fresh = db.prepare('SELECT balance_cents, status FROM users WHERE id = ?').get(user.id);
     if (fresh.status !== 'active') throw new UserError('Account is suspended.', 403);
     if (fresh.balance_cents < stake) throw new UserError('Not enough credit for this bet.');
-    const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents)
-      VALUES(?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout);
-    const ins = db.prepare(`INSERT INTO bet_legs(bet_id, event_id, sport_key, sport_title, home_team, away_team, commence_time, market, selection, point, price)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents, teaser_points, teaser_odds)
+      VALUES(?, ?, ?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout, teaserPts, teaserRow && JSON.stringify(teaserRow));
+    const ins = db.prepare(`INSERT INTO bet_legs(bet_id, event_id, sport_key, sport_title, home_team, away_team, commence_time, market, selection, point, orig_point, price)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     for (const l of legs) {
       ins.run(betId, l.event.id, l.event.sport_key, l.event.sport_title, l.event.home_team, l.event.away_team,
-        l.event.commence_time, l.market, l.selection, l.point, l.price);
+        l.event.commence_time, l.market, l.selection, l.point, type === 'teaser' ? l.origPoint : null, l.price);
     }
     applyTransaction(user.id, -stake, 'bet', { betId: Number(betId), note: `Bet #${betId}` });
     return getBet(Number(betId));
@@ -137,6 +164,13 @@ function evaluate(bet, legs) {
   if (legs.some(l => l.status === 'pending')) return { status: 'pending', payout: 0 };
   if (legs.every(l => l.status === 'void')) return { status: 'void', payout: bet.stake_cents };
   const winners = legs.filter(l => l.status === 'won');
+  if (bet.type === 'teaser') {
+    // Pushed or voided legs drop out and the teaser pays at the smaller size.
+    // Fewer than 2 winners left means the whole teaser is a push.
+    const table = JSON.parse(bet.teaser_odds || '{}');
+    if (winners.length < 2 || !table[winners.length]) return { status: 'push', payout: bet.stake_cents };
+    return { status: 'won', payout: Math.floor(bet.stake_cents * americanToDecimal(table[winners.length])) };
+  }
   if (!winners.length) return { status: 'push', payout: bet.stake_cents };
   const dec = winners.reduce((acc, l) => acc * americanToDecimal(l.price), 1);
   return { status: 'won', payout: Math.floor(bet.stake_cents * dec) };
@@ -262,5 +296,5 @@ function exposure() {
 
 module.exports = {
   UserError, americanToDecimal, decimalToAmerican, applyTransaction, placeBet, getBet, listBets,
-  settleLeg, settleBet, autoGrade, gradeLeg, evaluate, summary, exposure,
+  settleLeg, settleBet, autoGrade, gradeLeg, evaluate, summary, exposure, teasePoint,
 };

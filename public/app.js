@@ -24,6 +24,11 @@
   const sqlTime = s => (s ? when(s.replace(' ', 'T') + 'Z') : '');
   const MARKET = { h2h: 'Moneyline', spreads: 'Spread', totals: 'Total' };
 
+  const TEASER_SPORTS = ['americanfootball_', 'basketball_'];
+  const teaseOk = l => ['spreads', 'totals'].includes(l.market) && TEASER_SPORTS.some(p => String(l.sportKey || l.sport_key).startsWith(p));
+  const tease = (l, pts) => ({ ...l, point: l.market === 'totals' && l.selection === 'Over' ? Number(l.point) - pts : Number(l.point) + pts });
+  const betName = b => b.type === 'parlay' ? `${b.legs.length}-leg parlay` : b.type === 'teaser' ? `${b.legs.length}-leg teaser, ${b.teaser_points} pts` : 'Straight';
+
   function legLabel(l) {
     if (l.market === 'totals') return `${l.selection} ${l.point}`;
     if (l.market === 'spreads') return `${l.selection} ${pt(l.point)}`;
@@ -71,7 +76,7 @@
   // ---------- state ----------
   const state = {
     me: null, book: null, sports: [], sport: null, events: [], eventsInfo: null,
-    slip: loadSlip(), slipMode: 'single', slipOpen: false, placing: false,
+    slip: loadSlip(), slipMode: 'single', teaserPts: '6', slipOpen: false, placing: false,
   };
   function loadSlip() { try { return JSON.parse(localStorage.getItem('slip') || '[]'); } catch { return []; } }
   function saveSlip() { try { localStorage.setItem('slip', JSON.stringify(state.slip)); } catch { /* ignore */ } }
@@ -243,7 +248,10 @@
     if (!el) return;
     const s = state.slip;
     const parlayOk = s.length >= 2 && new Set(s.map(x => x.eventId)).size === s.length;
+    const teaserRow = (state.book.teaserOdds || {})[state.teaserPts] || {};
+    const teaserOk = parlayOk && s.every(teaseOk) && !!teaserRow[s.length];
     if (state.slipMode === 'parlay' && !parlayOk) state.slipMode = 'single';
+    if (state.slipMode === 'teaser' && !teaserOk) state.slipMode = 'single';
     if (fab) {
       fab.innerHTML = `<span>Bet slip (${s.length})</span><span>${s.length ? 'View' : ''}</span>`;
       fab.classList.toggle('hidden', !s.length || state.slipOpen);
@@ -259,17 +267,20 @@
     const legsHtml = s.map((l, i) => {
       const st = parseFloat(l.stake) || 0;
       if (mode === 'single') { totalStake += st; totalWin += st * dec(l.price); }
+      const sel = mode === 'teaser'
+        ? `${esc(legLabel(tease(l, Number(state.teaserPts))))} <span class="muted small">from ${esc(legLabel(l).replace(l.selection + ' ', ''))}</span>`
+        : `${esc(legLabel(l))} <span class="num">${odds(l.price)}</span>`;
       return `<div class="slip-leg ${l.changed ? 'changed' : ''}">
         <button class="x" data-rm="${i}" aria-label="Remove">×</button>
-        <div class="sel">${esc(legLabel(l))} <span class="num">${odds(l.price)}</span></div>
+        <div class="sel">${sel}</div>
         <div class="ev">${esc(l.away)} @ ${esc(l.home)} · ${esc(MARKET[l.market])}</div>
         ${l.changed ? `<div class="small" style="color:var(--warn)">Odds changed</div>` : ''}
         ${mode === 'single' ? `<input type="number" inputmode="decimal" min="0" step="0.01" placeholder="Stake $" data-stake="${i}" value="${esc(l.stake)}">
           <div class="small muted" data-win="${i}">${st ? 'To win ' + money(Math.floor(st * (dec(l.price) - 1) * 100)) : ''}</div>` : ''}
       </div>`;
     }).join('');
-    let parlayDec = s.reduce((a, l) => a * dec(l.price), 1);
-    if (mode === 'parlay') {
+    let parlayDec = mode === 'teaser' ? dec(teaserRow[s.length]) : s.reduce((a, l) => a * dec(l.price), 1);
+    if (mode === 'parlay' || mode === 'teaser') {
       const st = parseFloat(state.parlayStake) || 0;
       totalStake = st; totalWin = st * parlayDec;
     }
@@ -277,9 +288,11 @@
       <div class="row between" style="margin-bottom:10px"><h3 style="margin:0">Bet slip</h3>
         <div class="row" style="gap:6px"><button class="btn sm" id="slipClear">Clear</button><button class="btn sm slip-close" id="slipClose">Hide</button></div></div>
       ${s.length >= 2 ? `<div class="tabs"><button data-slipmode="single" class="${mode === 'single' ? 'on' : ''}">Straight bets</button>
-        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : 'disabled title="Only one pick per game in a parlay"'}>Parlay</button></div>` : ''}
+        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : 'disabled title="Only one pick per game in a parlay"'}>Parlay</button>
+        <button data-slipmode="teaser" class="${mode === 'teaser' ? 'on' : ''}" ${teaserOk ? '' : 'disabled title="Teasers are 2 to 6 football or basketball spreads and totals, one per game"'}>Teaser</button></div>` : ''}
+      ${mode === 'teaser' ? `<div class="tabs">${['6', '6.5', '7'].map(p => `<button data-teaserpts="${p}" class="${state.teaserPts === p ? 'on' : ''}">${p} pts</button>`).join('')}</div>` : ''}
       ${legsHtml}
-      ${mode === 'parlay' ? `<div class="slip-total"><span>${s.length}-leg parlay</span><b class="num">${decToAm(parlayDec)}</b></div>
+      ${mode === 'parlay' || mode === 'teaser' ? `<div class="slip-total"><span>${s.length}-leg ${mode}</span><b class="num">${decToAm(parlayDec)}</b></div>
         <input type="number" inputmode="decimal" min="0" step="0.01" placeholder="Stake $" id="parlayStake" value="${esc(state.parlayStake || '')}">` : ''}
       <div class="slip-total"><span class="muted">Total stake</span><b id="slipStake">${money(Math.round(totalStake * 100))}</b></div>
       <div class="slip-total"><span class="muted">Total payout</span><b id="slipWin" class="pos">${money(Math.floor(totalWin * 100))}</b></div>
@@ -289,6 +302,7 @@
     </div>`;
     $$('[data-rm]', el).forEach(b => b.onclick = () => { state.slip.splice(+b.dataset.rm, 1); saveSlip(); drawGames(); drawSlip(); });
     $$('[data-slipmode]', el).forEach(b => b.onclick = () => { state.slipMode = b.dataset.slipmode; drawSlip(); });
+    $$('[data-teaserpts]', el).forEach(b => b.onclick = () => { state.teaserPts = b.dataset.teaserpts; drawSlip(); });
     $('#slipClear', el).onclick = () => { state.slip = []; saveSlip(); drawGames(); drawSlip(); };
     $('#slipClose', el).onclick = () => { state.slipOpen = false; drawSlip(); };
     $$('[data-stake]', el).forEach(inp => inp.oninput = () => {
@@ -305,7 +319,7 @@
 
     function updateTotals() {
       let ts = 0, tw = 0;
-      if (state.slipMode === 'parlay') { ts = parseFloat(state.parlayStake) || 0; tw = ts * parlayDec; }
+      if (state.slipMode !== 'single') { ts = parseFloat(state.parlayStake) || 0; tw = ts * parlayDec; }
       else for (const l of state.slip) { const st = parseFloat(l.stake) || 0; ts += st; tw += st * dec(l.price); }
       $('#slipStake', el).textContent = money(Math.round(ts * 100));
       $('#slipWin', el).textContent = money(Math.floor(tw * 100));
@@ -326,8 +340,8 @@
     const err = $('#slipErr');
     err.textContent = '';
     const legOf = l => ({ eventId: l.eventId, sportKey: l.sportKey, market: l.market, selection: l.selection, point: l.point, price: l.price });
-    const jobs = state.slipMode === 'parlay'
-      ? [{ type: 'parlay', stake: state.parlayStake, legs: state.slip.map(legOf), keys: state.slip.map(l => l.key) }]
+    const jobs = state.slipMode !== 'single'
+      ? [{ type: state.slipMode, stake: state.parlayStake, legs: state.slip.map(legOf), keys: state.slip.map(l => l.key), teaserPoints: Number(state.teaserPts) }]
       : state.slip.map(l => ({ type: 'single', stake: l.stake, legs: [legOf(l)], keys: [l.key] }));
     if (jobs.some(j => !(parseFloat(j.stake) > 0))) { err.textContent = 'Enter a stake for every bet.'; return; }
     state.placing = true;
@@ -336,7 +350,7 @@
     const errors = [];
     for (const j of jobs) {
       try {
-        const r = await api('POST', '/api/bets', { type: j.type, stake: j.stake, legs: j.legs });
+        const r = await api('POST', '/api/bets', { type: j.type, stake: j.stake, legs: j.legs, teaserPoints: j.teaserPoints });
         setBalance(r.balanceCents);
         state.slip = state.slip.filter(s => !j.keys.includes(s.key));
         placed++;
@@ -358,16 +372,16 @@
   function betCard(b, { admin = false } = {}) {
     const legs = b.legs.map(l => `
       <div class="leg"><div>
-        <div class="sel">${esc(legLabel(l))} <span class="num muted">${odds(l.price)}</span></div>
+        <div class="sel">${esc(legLabel(l))} ${b.type === 'teaser' ? `<span class="muted small">from ${esc(l.market === 'totals' ? l.orig_point : pt(l.orig_point))}</span>` : `<span class="num muted">${odds(l.price)}</span>`}</div>
         <div class="small muted">${esc(l.sport_title || '')} · ${esc(l.away_team)} @ ${esc(l.home_team)} · ${esc(when(l.commence_time))}</div>
         ${l.result_note ? `<div class="small muted">${esc(l.result_note)}</div>` : ''}
       </div>
-      <div style="text-align:right">${b.type === 'parlay' ? `<span class="pill ${l.status}">${l.status}</span>` : ''}
+      <div style="text-align:right">${b.type !== 'single' ? `<span class="pill ${l.status}">${l.status}</span>` : ''}
         ${admin ? `<div class="settle" style="margin-top:6px;justify-content:flex-end">${['won', 'lost', 'push', 'void'].map(s => `<button class="btn sm" data-leg="${l.id}" data-res="${s}" ${l.status === s ? 'disabled' : ''}>${s[0].toUpperCase() + s.slice(1)}</button>`).join('')}</div>` : ''}
       </div></div>`).join('');
     const result = b.status === 'pending' ? `To pay <b>${money(b.potential_payout_cents)}</b>` : `Paid <b>${money(b.payout_cents)}</b>`;
     return `<div class="bet">
-      <div class="bet-head"><div><b>${b.type === 'parlay' ? `${b.legs.length}-leg parlay` : 'Straight'}</b> <span class="muted small">#${b.id}${admin ? ` · <a href="#/admin/clients/${b.user_id}">${esc(b.username)}</a>` : ''} · ${esc(sqlTime(b.created_at))}</span></div>
+      <div class="bet-head"><div><b>${esc(betName(b))}</b> <span class="muted small">#${b.id}${admin ? ` · <a href="#/admin/clients/${b.user_id}">${esc(b.username)}</a>` : ''} · ${esc(sqlTime(b.created_at))}</span></div>
         <span class="pill ${b.status}">${b.status}</span></div>
       ${legs}
       <div class="bet-foot"><span>Stake <b>${money(b.stake_cents)}</b></span><span>Odds <b>${decToAm(b.decimal_odds)}</b></span><span>${result}</span>
@@ -582,7 +596,7 @@
   }
 
   async function renderRisk() {
-    const view = shell('<h1>Risk</h1><p class="muted small">Open action by game and side. Straight-bet payout is what you pay if that side wins; parlays are counted in stake only.</p><div class="panel"><div class="table-wrap" id="r">Loading…</div></div>');
+    const view = shell('<h1>Risk</h1><p class="muted small">Open action by game and side. Straight-bet payout is what you pay if that side wins; parlays and teasers are counted in stake only.</p><div class="panel"><div class="table-wrap" id="r">Loading…</div></div>');
     const { exposure } = await api('GET', '/api/admin/exposure');
     if (!exposure.length) { $('#r', view).innerHTML = '<div class="muted">No open action.</div>'; return; }
     $('#r', view).innerHTML = `<table><thead><tr><th>Game</th><th>Pick</th><th class="r">Bets</th><th class="r">Staked</th><th class="r">Straight payout</th></tr></thead><tbody>
@@ -602,6 +616,8 @@
     const view = shell('<h1>Settings</h1><div id="s"><div class="empty">Loading…</div></div>');
     const { settings: s, odds: o, sports, envKey } = await api('GET', '/api/admin/settings');
     const d = c => ((Number(c) || 0) / 100).toFixed(2);
+    let teaser = {};
+    try { teaser = JSON.parse(s.teaser_odds) || {}; } catch { /* keep blank */ }
     const groups = {};
     for (const sp of sports) (groups[sp.group] = groups[sp.group] || []).push(sp);
     $('#s', view).innerHTML = `
@@ -617,6 +633,12 @@
         <label class="field"><span>Maximum payout per bet ($)</span><input type="number" step="0.01" min="0" data-cents="max_payout_cents" value="${d(s.max_payout_cents)}"></label>
         <label class="field"><span>Maximum parlay legs</span><input type="number" min="2" max="15" name="max_parlay_legs" value="${esc(s.max_parlay_legs)}"></label>
       </div></div>
+      <div class="panel"><h3>Teaser payouts</h3>
+        <p class="small muted" style="margin-top:0">Football and basketball spreads and totals only. Enter American odds for each number of legs; a blank box turns that size off. A pushed leg drops out and the teaser pays at the next size down; a 2-leg teaser with a push is refunded.</p>
+        <div class="table-wrap"><table><thead><tr><th>Legs</th>${['6', '6.5', '7'].map(p => `<th>${p} pts</th>`).join('')}</tr></thead><tbody>
+        ${['2', '3', '4', '5', '6'].map(n => `<tr><td>${n}</td>${['6', '6.5', '7'].map(p => `<td><input type="text" inputmode="numeric" style="width:80px" data-teaser="${p}|${n}" value="${esc(teaser[p] && teaser[p][n] != null ? odds(teaser[p][n]) : '')}"></td>`).join('')}</tr>`).join('')}
+        </tbody></table></div>
+      </div>
       <div class="panel"><h3>Client sign up</h3>
         <label class="check"><input type="checkbox" name="signup_enabled" ${s.signup_enabled === '1' ? 'checked' : ''}> Let people create their own account from the link</label>
         <div class="grid2">
@@ -652,6 +674,12 @@
       const body = {};
       for (const el of $$('input[name], select[name]', form)) body[el.name] = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
       for (const el of $$('[data-cents]', form)) body[el.dataset.cents] = Math.round((parseFloat(el.value) || 0) * 100);
+      const t = {};
+      for (const el of $$('[data-teaser]', form)) {
+        const [p, n] = el.dataset.teaser.split('|');
+        (t[p] = t[p] || {})[n] = el.value.trim().replace(/^\+/, '');
+      }
+      body.teaser_odds = t;
       body.enabled_sports = $$('[data-sportkey]', form).filter(x => x.checked).map(x => x.dataset.sportkey).join(',');
       try {
         await api('PATCH', '/api/admin/settings', body);
