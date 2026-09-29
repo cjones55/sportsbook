@@ -4,7 +4,7 @@ A private, credit-based sportsbook. The bookie shares one link; clients log in, 
 lines (DraftKings first, via The Odds API), and place straight bets, parlays or teasers with their
 credit. The admin login manages clients, credit, bets, grading and settings. All amounts are USD credit.
 
-No dependencies: Node 22.5+ and its built-in SQLite.
+No dependencies: Node 22.13+ and its built-in SQLite.
 
 ## Run it
 
