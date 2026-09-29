@@ -9,6 +9,6 @@
     "test": "node --no-warnings=ExperimentalWarning --test test/flow.test.js"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.13"
   }
 }
