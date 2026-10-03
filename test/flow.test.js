@@ -314,3 +314,117 @@ test('free play', async () => {
   assert.ok(ledger.some(t => t.type === 'freeplay' && t.wallet === 'freeplay' && t.amount_cents === 5000));
   assert.ok(ledger.some(t => t.type === 'bet' && t.wallet === 'freeplay'));
 });
+
+test('props from the feed (demo) are straight bets graded by the bookie', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const joe = client();
+  await joe('POST', '/api/login', { username: 'joe', password: 'secret1' });
+  const joeRow = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  bets.applyTransaction(joeRow.id, 50000, 'deposit');
+
+  const nba = (await joe('GET', '/api/odds/basketball_nba')).body.events;
+  assert.ok(nba[0].hasProps);
+  assert.ok(!(await joe('GET', '/api/odds/tennis_atp')).body.events.some(e => e.hasProps));
+  const ev = nba[0];
+  const p = (await joe('GET', `/api/props/basketball_nba/${ev.id}`)).body;
+  assert.equal(p.source, 'demo');
+  const mk = p.markets.find(m => m.key === 'player_points');
+  assert.ok(mk && mk.outcomes.length >= 4);
+  const o = mk.outcomes[0];
+  const leg = { eventId: ev.id, sportKey: ev.sport_key, market: mk.key, selection: o.name, point: o.point, price: o.price, description: o.description };
+
+  // Unknown game: no props, nothing fetched.
+  assert.deepEqual((await joe('GET', '/api/props/basketball_nba/nope')).body.markets, []);
+
+  // Stale price comes back with the new one; wrong player is removed.
+  const stale = await joe('POST', '/api/bets', { type: 'single', stake: 10, legs: [{ ...leg, price: o.price + 40 }] });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.changed[0].price, o.price);
+  const gone = await joe('POST', '/api/bets', { type: 'single', stake: 10, legs: [{ ...leg, description: 'Nobody' }] });
+  assert.equal(gone.status, 409);
+  assert.ok(gone.body.changed[0].removed);
+
+  // No props in parlays.
+  const other = nba[1];
+  const parlay = await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [leg, pick(other, 'h2h')] });
+  assert.equal(parlay.status, 400);
+  assert.match(parlay.body.error, /straight bets only/);
+
+  const placed = await joe('POST', '/api/bets', { type: 'single', stake: 20, legs: [leg] });
+  assert.equal(placed.status, 200, JSON.stringify(placed.body));
+  const b = placed.body.bet;
+  assert.equal(b.legs[0].description, o.description);
+  assert.equal(b.legs[0].prop_name, 'Points');
+  assert.equal(b.potential_payout_cents, Math.floor(2000 * bets.americanToDecimal(o.price)));
+
+  // The scores feed can't grade it, so it waits for the bookie.
+  db.prepare('UPDATE bet_legs SET commence_time = ? WHERE bet_id = ?').run(new Date(Date.now() - 5 * 3600e3).toISOString(), b.id);
+  await bets.autoGrade({ force: true });
+  assert.equal(bets.getBet(b.id).status, 'pending');
+  const toGrade = (await admin('GET', '/api/admin/bets?status=props')).body.bets;
+  assert.deepEqual(toGrade.map(x => x.id), [b.id]);
+  const before = balance(joeRow.id);
+  await admin('POST', `/api/admin/legs/${b.legs[0].id}/settle`, { status: 'won' });
+  assert.equal(balance(joeRow.id), before + b.potential_payout_cents);
+  assert.equal((await admin('GET', '/api/admin/bets?status=props')).body.bets.length, 0);
+});
+
+test('the bookie can write, grade and undo their own props', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const joe = client();
+  await joe('POST', '/api/login', { username: 'joe', password: 'secret1' });
+  const joeRow = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  const ev = future('americanfootball_nfl')[0];
+
+  assert.equal((await admin('POST', '/api/admin/props', { sportKey: ev.sport_key, eventId: ev.id, question: 'Overtime?', options: [{ name: 'Yes', price: '50' }] })).status, 400);
+  assert.equal((await admin('POST', '/api/admin/props', { sportKey: ev.sport_key, eventId: 'nope', question: 'Overtime?', options: [{ name: 'Yes', price: '+400' }] })).status, 400);
+  const onGame = await admin('POST', '/api/admin/props', { sportKey: ev.sport_key, eventId: ev.id, question: 'Will the game go to overtime?', options: [{ name: 'Yes', price: '+400' }, { name: 'No', price: '-600' }] });
+  assert.equal(onGame.status, 200, JSON.stringify(onGame.body));
+  const special = await admin('POST', '/api/admin/props', {
+    eventName: 'NFL Awards', question: 'MVP', closesAt: new Date(Date.now() + 86400e3).toISOString(),
+    options: [{ name: 'Patrick Mahomes', price: '+300' }, { name: 'Josh Allen', price: '+450' }, { name: 'Lamar Jackson', price: '+500' }],
+  });
+  assert.equal(special.status, 200, JSON.stringify(special.body));
+  const sp = special.body.prop;
+  assert.equal(sp.eventId, `special_${sp.id}`);
+
+  // Clients see the game's prop and the Specials tab.
+  assert.ok((await joe('GET', '/api/sports')).body.sports.some(s => s.key === 'specials'));
+  assert.deepEqual((await joe('GET', '/api/odds/specials')).body.specials.map(x => x.id), [sp.id]);
+  const gp = (await joe('GET', `/api/props/${ev.sport_key}/${ev.id}`)).body;
+  assert.equal(gp.custom[0].question, 'Will the game go to overtime?');
+
+  const custom = (prop, name, price) => ({ eventId: prop.eventId, sportKey: prop.sportKey, market: 'custom', propId: prop.id, selection: name, point: null, price });
+  const b1 = (await joe('POST', '/api/bets', { type: 'single', stake: 10, legs: [custom(sp, 'Josh Allen', 450)] })).body.bet;
+  const b2 = (await joe('POST', '/api/bets', { type: 'single', stake: 10, legs: [custom(sp, 'Lamar Jackson', 500)] })).body.bet;
+  assert.equal(b1.potential_payout_cents, 5500);
+  assert.equal(b1.legs[0].prop_name, 'MVP');
+  assert.equal((await joe('POST', '/api/bets', { type: 'single', stake: 10, legs: [custom(sp, 'Josh Allen', 300)] })).status, 409);
+
+  // Can't delete a prop with bets; closing stops new bets.
+  assert.equal((await admin('DELETE', `/api/admin/props/${sp.id}`)).status, 400);
+  await admin('PATCH', `/api/admin/props/${sp.id}`, { status: 'closed' });
+  assert.equal((await joe('POST', '/api/bets', { type: 'single', stake: 10, legs: [custom(sp, 'Josh Allen', 450)] })).status, 409);
+
+  const before = balance(joeRow.id);
+  const g = await admin('POST', `/api/admin/props/${sp.id}/settle`, { winner: 'Josh Allen' });
+  assert.equal(g.body.graded, 2);
+  assert.equal(bets.getBet(b1.id).status, 'won');
+  assert.equal(bets.getBet(b2.id).status, 'lost');
+  assert.equal(balance(joeRow.id), before + 5500);
+  const list = (await admin('GET', '/api/admin/props')).body.props;
+  assert.equal(list.find(x => x.id === sp.id).result, 'Josh Allen');
+  assert.equal(list.find(x => x.id === sp.id).bets, 2);
+
+  // Undo puts the credit back as it was.
+  await admin('POST', `/api/admin/props/${sp.id}/settle`, { winner: 'pending' });
+  assert.equal(bets.getBet(b1.id).status, 'pending');
+  assert.equal(balance(joeRow.id), before);
+  await admin('POST', `/api/admin/props/${sp.id}/settle`, { winner: 'void' });
+  assert.equal(balance(joeRow.id), before + 2000);
+
+  // A prop with no bets can be deleted.
+  assert.equal((await admin('DELETE', `/api/admin/props/${onGame.body.prop.id}`)).status, 200);
+});

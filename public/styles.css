@@ -113,6 +113,16 @@ td.r, th.r { text-align: right; }
 .odd.na { cursor: default; color: var(--muted); background: transparent; border-style: dashed; }
 .empty { text-align: center; color: var(--muted); padding: 40px 12px; }
 
+/* props */
+.linkbtn { background: none; border: 0; padding: 0 0 0 8px; color: var(--accent); font: inherit; font-weight: 700; cursor: pointer; }
+.props { border-top: 1px solid var(--line); padding: 8px 12px 10px; }
+.prop-tabs { margin-bottom: 6px; }
+.chip.sm { padding: 4px 10px; font-size: .78rem; }
+.prop-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 4px 0; }
+.prop-q { font-weight: 600; grid-column: 1 / -1; }
+.prop-odds { display: grid; grid-auto-flow: column; grid-auto-columns: 88px; gap: 6px; }
+.prop-odds.wrap { grid-column: 1 / -1; grid-auto-flow: row; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+
 /* slip */
 .slip { position: sticky; top: 72px; }
 .slip .panel { margin: 0; }

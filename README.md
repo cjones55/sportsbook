@@ -19,12 +19,13 @@ The first start creates the admin account from `ADMIN_USERNAME` / `ADMIN_PASSWOR
 ## What's in it
 
 **Clients**: odds board by sport (spread, moneyline, total), bet slip with straight bets,
-parlays or teasers (6, 6.5 or 7 points on football and basketball spreads and totals, 2 to 6 legs), open and settled bets, credit history, password change. Works on phones.
+parlays or teasers (6, 6.5 or 7 points on football and basketball spreads and totals, 2 to 6 legs), props (a game's Props button, plus a Specials tab for the bookie's stand-alone props), open and settled bets, credit history, password change. Works on phones.
 
 **Admin**
 - Dashboard: book profit, open action, max liability, share link.
 - Clients: create logins, add or remove credit, give free play (bets with it pay profit only; a push returns the free play), per-client max bet, reset passwords, suspend, private notes.
 - Bets: every bet; grade each pick Won / Lost / Push / Void by hand, or void a whole bet. Re-grading a settled bet corrects the client's credit automatically.
+- Props: write your own props on a game (overtime? first score?) or stand-alone specials (MVP, futures), with your own odds. Pick the winner and every bet on it is graded; undo or void if needed.
 - Risk: open action per game and side.
 - Ledger: every credit movement.
 - Settings: book name, pause betting, min/max bet, max payout, parlay size, teaser payout table, self sign-up with invite code, odds API key, which sports show.
@@ -36,8 +37,15 @@ requests a month and one sport refresh costs about 3, so a busy book will want t
 Bets are checked against the current line when placed; if the price moved, the client is
 shown the new price. Games that already started can't be bet.
 
+**Props**: player and game props for NFL, NBA, MLB and NHL come from the same feed, fetched
+one game at a time only when someone opens that game's props (cached 60 minutes by default).
+Each load costs about one request per prop market, roughly 6, so props use the free plan's 500
+requests quickly; the $30 plan (20,000 a month) suits a small book. Props are straight bets
+only (no parlays or teasers). Without a key, demo props are shown.
+
 **Grading**: every 15 minutes the server pulls final scores for games with open bets and
-grades them. Tennis and anything the scores feed doesn't cover gets graded by hand in Admin > Bets.
+grades them. Tennis, props (the feed has no player stats) and anything else the scores feed
+doesn't cover gets graded by hand in Admin > Bets (the "Props to grade" tab lists open props).
 
 ## Hosting
 
