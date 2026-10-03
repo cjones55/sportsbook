@@ -272,4 +272,5 @@ function status() {
 module.exports = {
   allSports, boardSports, getEvents, fetchScores, mockScoresFor, isLive, status, DEFAULT_GROUPS,
   _resetSportsCache: () => { sportsMem = null; }, _mockEvents: mockEvents,
+  apiGet, quotaTooLow, rng, probToAmerican,
 };

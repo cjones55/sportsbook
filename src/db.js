@@ -83,6 +83,27 @@ CREATE TABLE IF NOT EXISTS odds_cache (
   source TEXT NOT NULL,
   data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS props_cache (
+  event_id TEXT PRIMARY KEY,
+  sport_key TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS custom_props (
+  id INTEGER PRIMARY KEY,
+  event_id TEXT,
+  sport_key TEXT NOT NULL,
+  sport_title TEXT,
+  home_team TEXT,
+  away_team TEXT,
+  commence_time TEXT NOT NULL,
+  question TEXT NOT NULL,
+  options TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  result TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS scores (
   event_id TEXT PRIMARY KEY,
   sport_key TEXT NOT NULL,
@@ -106,6 +127,11 @@ addColumn('users', 'freeplay_cents', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('transactions', 'wallet', "TEXT NOT NULL DEFAULT 'credit'");
 addColumn('bets', 'freeplay', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('bets', 'freeplay_back_cents', 'INTEGER NOT NULL DEFAULT 0');
+// Props: who or what the pick is about (player or team), the market's name, and the bookie's own prop if it is one.
+addColumn('bet_legs', 'description', 'TEXT');
+addColumn('bet_legs', 'prop_name', 'TEXT');
+addColumn('bet_legs', 'prop_id', 'INTEGER');
+db.exec('CREATE INDEX IF NOT EXISTS idx_legs_prop ON bet_legs(prop_id)');
 
 // Run fn inside a transaction; nested calls join the outer one.
 let depth = 0;
@@ -141,6 +167,8 @@ const DEFAULT_SETTINGS = {
   bookmakers: 'draftkings,fanduel,betmgm,williamhill_us,betrivers',
   enabled_sports: '',
   auto_grade: '1',
+  props_enabled: '1',
+  props_ttl_minutes: '60',
   // American odds a teaser pays, by teaser size and number of winning legs.
   teaser_odds: JSON.stringify({
     6: { 2: -110, 3: 180, 4: 300, 5: 450, 6: 600 },

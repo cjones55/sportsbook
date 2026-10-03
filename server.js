@@ -17,6 +17,7 @@ const { db, tx, getSetting, setSetting, intSetting, teaserOdds } = require(SRC +
 const auth = require(SRC + 'auth');
 const odds = require(SRC + 'odds');
 const bets = require(SRC + 'bets');
+const props = require(SRC + 'props');
 const { UserError } = bets;
 
 const PUBLIC = fs.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
@@ -144,14 +145,25 @@ route('POST', '/api/me/password', (req, res, { user, body }) => {
   return { ok: true };
 });
 
-route('GET', '/api/sports', async () => ({ sports: await odds.boardSports() }));
+route('GET', '/api/sports', async () => {
+  const sports = await odds.boardSports();
+  if (props.hasSpecials()) sports.push({ key: 'specials', group: 'Specials', title: 'Specials', active: true });
+  return { sports };
+});
 
 route('GET', '/api/odds/:sport', async (req, res, { params }) => {
+  if (params.sport === 'specials') return { fetchedAt: Date.now(), source: 'custom', events: [], specials: props.openCustom(null) };
   const r = await odds.getEvents(params.sport);
+  const custom = props.eventsWithCustom();
+  const feed = props.feedPropsOn(params.sport);
   const events = r.events.filter(e => Date.parse(e.commence_time) > Date.now())
-    .sort((a, b) => a.commence_time.localeCompare(b.commence_time));
+    .sort((a, b) => a.commence_time.localeCompare(b.commence_time))
+    .map(e => ({ ...e, hasProps: feed || custom.has(e.id) }));
   return { fetchedAt: r.fetchedAt, source: r.source, events };
 });
+
+// A game's props. Live props are fetched only here, when someone opens the game.
+route('GET', '/api/props/:sport/:event', async (req, res, { params }) => props.forEvent(params.sport, params.event));
 
 route('POST', '/api/bets', async (req, res, { user, body }) => {
   if (user.role !== 'client') throw new UserError('Admin accounts cannot place bets. Log in as a client.', 403);
@@ -267,6 +279,60 @@ route('POST', '/api/admin/legs/:id/settle', { auth: 'admin' }, (req, res, { para
   bet: bets.settleLeg(Number(params.id), body.status, { note: body.note || 'Set by admin' }),
 }));
 
+// The bookie's own props.
+route('GET', '/api/admin/props', { auth: 'admin' }, () => ({
+  props: db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM bet_legs l WHERE l.prop_id = p.id) bets,
+      (SELECT COALESCE(SUM(b.stake_cents),0) FROM bet_legs l JOIN bets b ON b.id = l.bet_id WHERE l.prop_id = p.id) stake
+    FROM custom_props p ORDER BY CASE p.status WHEN 'settled' THEN 1 ELSE 0 END, p.commence_time DESC, p.id DESC LIMIT 300`).all()
+    .map(p => ({ ...props.customView(p), bets: p.bets, stakeCents: p.stake })),
+}));
+
+route('POST', '/api/admin/props', { auth: 'admin' }, async (req, res, { body }) => {
+  const question = String(body.question || '').trim().slice(0, 200);
+  if (!question) throw new UserError('Write the prop, like "Will the game go to overtime?"');
+  const options = (Array.isArray(body.options) ? body.options : []).map(o => {
+    const name = String(o.name || '').trim().slice(0, 80);
+    if (!name) return null;
+    const price = Math.round(Number(String(o.price ?? '').replace(/^\+/, '')));
+    if (!Number.isFinite(price) || Math.abs(price) < 100) throw new UserError(`Odds for "${name}" must be American odds like -110 or +250.`);
+    return { name, price };
+  }).filter(Boolean);
+  if (options.length < 1) throw new UserError('Add at least one option with odds.');
+  if (new Set(options.map(o => o.name)).size !== options.length) throw new UserError('Each option needs a different name.');
+  let ev;
+  if (body.eventId) {
+    ev = (await odds.getEvents(String(body.sportKey || ''))).events.find(e => e.id === body.eventId);
+    if (!ev) throw new UserError('That game is not on the board.');
+  } else {
+    const closes = new Date(body.closesAt || '');
+    if (!Number.isFinite(closes.getTime()) || closes.getTime() <= Date.now()) throw new UserError('Pick when betting closes, in the future.');
+    ev = { id: null, sport_key: 'specials', sport_title: String(body.eventName || '').trim().slice(0, 80) || 'Specials', home_team: null, away_team: null, commence_time: closes.toISOString() };
+  }
+  const id = tx(() => {
+    const { lastInsertRowid } = db.prepare(`INSERT INTO custom_props(event_id, sport_key, sport_title, home_team, away_team, commence_time, question, options)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).run(ev.id, ev.sport_key, ev.sport_title, ev.home_team, ev.away_team, ev.commence_time, question, JSON.stringify(options));
+    if (!ev.id) db.prepare('UPDATE custom_props SET event_id = ? WHERE id = ?').run(`special_${lastInsertRowid}`, lastInsertRowid);
+    return Number(lastInsertRowid);
+  });
+  return { prop: props.customView(db.prepare('SELECT * FROM custom_props WHERE id = ?').get(id)) };
+});
+
+route('PATCH', '/api/admin/props/:id', { auth: 'admin' }, (req, res, { params, body }) => {
+  const p = db.prepare('SELECT * FROM custom_props WHERE id = ?').get(params.id);
+  if (!p) throw new UserError('Prop not found.', 404);
+  if (!['open', 'closed'].includes(body.status) || p.status === 'settled') throw new UserError('Only an ungraded prop can be opened or closed.');
+  db.prepare('UPDATE custom_props SET status = ? WHERE id = ?').run(body.status, p.id);
+  return { ok: true };
+});
+
+route('POST', '/api/admin/props/:id/settle', { auth: 'admin' }, (req, res, { params, body }) => bets.settleCustomProp(Number(params.id), String(body.winner || '')));
+
+route('DELETE', '/api/admin/props/:id', { auth: 'admin' }, (req, res, { params }) => {
+  if (db.prepare('SELECT 1 FROM bet_legs WHERE prop_id = ?').get(params.id)) throw new UserError('This prop has bets on it. Close it or void it instead.');
+  db.prepare('DELETE FROM custom_props WHERE id = ?').run(params.id);
+  return { ok: true };
+});
+
 route('POST', '/api/admin/grade', { auth: 'admin' }, async () => bets.autoGrade({ force: true }));
 
 route('GET', '/api/admin/transactions', { auth: 'admin' }, (req, res, { query }) => ({
@@ -276,7 +342,7 @@ route('GET', '/api/admin/transactions', { auth: 'admin' }, (req, res, { query })
 
 const EDITABLE = ['book_name', 'betting_open', 'signup_enabled', 'signup_code', 'signup_starting_credit_cents',
   'min_bet_cents', 'max_bet_cents', 'max_payout_cents', 'max_parlay_legs', 'odds_api_key', 'odds_ttl_minutes',
-  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds'];
+  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds', 'props_enabled', 'props_ttl_minutes'];
 
 // Accepts {"6": {"2": -110, "3": 180, ...}, "6.5": {...}, "7": {...}}.
 function cleanTeaserOdds(v) {
@@ -316,14 +382,14 @@ route('PATCH', '/api/admin/settings', { auth: 'admin' }, (req, res, { body }) =>
     if (!EDITABLE.includes(k)) continue;
     if (k === 'odds_api_key' && typeof v === 'string' && v.includes('…')) continue; // masked value echoed back
     if (k === 'teaser_odds') { setSetting(k, cleanTeaserOdds(v)); continue; }
-    if (k.endsWith('_cents') || ['max_parlay_legs', 'odds_ttl_minutes', 'odds_quota_floor'].includes(k)) {
+    if (k.endsWith('_cents') || ['max_parlay_legs', 'odds_ttl_minutes', 'odds_quota_floor', 'props_ttl_minutes'].includes(k)) {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0) throw new UserError(`Invalid value for ${k}`);
       setSetting(k, String(Math.round(n)));
     } else {
       setSetting(k, v == null ? '' : String(v).trim());
     }
-    if (k === 'odds_api_key' || k === 'bookmakers') { db.exec('DELETE FROM odds_cache'); odds._resetSportsCache(); }
+    if (k === 'odds_api_key' || k === 'bookmakers') { db.exec('DELETE FROM odds_cache; DELETE FROM props_cache'); odds._resetSportsCache(); }
   }
   return { ok: true };
 });

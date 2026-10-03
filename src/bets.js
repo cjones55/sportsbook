@@ -1,6 +1,7 @@
 'use strict';
 const { db, tx, intSetting, getSetting, teaserOdds } = require('./db');
 const odds = require('./odds');
+const props = require('./props');
 
 class UserError extends Error {
   constructor(message, status = 400, extra) { super(message); this.status = status; this.extra = extra; }
@@ -61,6 +62,7 @@ async function placeBet(user, body) {
     const ids = new Set(legsIn.map(l => l.eventId));
     if (ids.size !== legsIn.length) throw new UserError('A parlay can only include one selection per game.');
   }
+  if (type !== 'single' && legsIn.some(l => props.isProp(l.market))) throw new UserError('Props are straight bets only. Take them out to make a parlay or teaser.');
   let teaserPts = null, teaserRow = null;
   if (type === 'teaser') {
     teaserPts = Number(body.teaserPoints);
@@ -86,6 +88,14 @@ async function placeBet(user, body) {
   const changed = [];
   const bySport = {};
   for (const l of legsIn) {
+    if (props.isProp(l.market)) {
+      const r = await props.resolveLeg(l);
+      if (r.gone) throw new UserError(r.gone, 409);
+      if (r.removed) { changed.push({ ...l, removed: true }); continue; }
+      if (r.changed) { changed.push({ ...l, ...r.changed }); continue; }
+      legs.push({ ...r.leg, origPoint: null });
+      continue;
+    }
     if (!['h2h', 'spreads', 'totals'].includes(l.market)) throw new UserError('Unknown market.');
     bySport[l.sportKey] = bySport[l.sportKey] || (await odds.getEvents(l.sportKey)).events;
     const event = bySport[l.sportKey].find(e => e.id === l.eventId);
@@ -115,11 +125,13 @@ async function placeBet(user, body) {
     if (!freeplay && fresh.balance_cents < stake) throw new UserError('Not enough credit for this bet.');
     const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents, teaser_points, teaser_odds, freeplay)
       VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout, teaserPts, teaserRow && JSON.stringify(teaserRow), freeplay ? 1 : 0);
-    const ins = db.prepare(`INSERT INTO bet_legs(bet_id, event_id, sport_key, sport_title, home_team, away_team, commence_time, market, selection, point, orig_point, price)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const ins = db.prepare(`INSERT INTO bet_legs(bet_id, event_id, sport_key, sport_title, home_team, away_team, commence_time, market, selection, point, orig_point, price,
+        description, prop_name, prop_id)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     for (const l of legs) {
       ins.run(betId, l.event.id, l.event.sport_key, l.event.sport_title, l.event.home_team, l.event.away_team,
-        l.event.commence_time, l.market, l.selection, l.point, type === 'teaser' ? l.origPoint : null, l.price);
+        l.event.commence_time, l.market, l.selection, l.point, type === 'teaser' ? l.origPoint : null, l.price,
+        l.description ?? null, l.propName ?? null, l.propId ?? null);
     }
     applyTransaction(user.id, -stake, 'bet', { betId: Number(betId), note: `Bet #${betId}`, wallet: freeplay ? 'freeplay' : 'credit' });
     return getBet(Number(betId));
@@ -141,6 +153,7 @@ function listBets({ userId, status, limit = 200, offset = 0 } = {}) {
   if (userId) { where.push('b.user_id = ?'); args.push(userId); }
   if (status === 'open') where.push("b.status = 'pending'");
   else if (status === 'settled') where.push("b.status != 'pending'");
+  else if (status === 'props') where.push("b.status = 'pending' AND EXISTS (SELECT 1 FROM bet_legs pl WHERE pl.bet_id = b.id AND pl.market NOT IN ('h2h','spreads','totals'))");
   else if (status) { where.push('b.status = ?'); args.push(status); }
   const sql = `SELECT b.*, u.username FROM bets b JOIN users u ON u.id = b.user_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY b.id DESC LIMIT ? OFFSET ?`;
@@ -251,7 +264,8 @@ function gradeLeg(leg, score) {
 // Pull final scores for sports with open bets and grade everything that finished.
 async function autoGrade({ force = false } = {}) {
   if (!force && getSetting('auto_grade') !== '1') return { graded: 0, errors: [] };
-  const pending = db.prepare(`SELECT * FROM bet_legs WHERE status = 'pending' AND commence_time < ?`)
+  // Props are left for the bookie: the scores feed has no player stats.
+  const pending = db.prepare(`SELECT * FROM bet_legs WHERE status = 'pending' AND market IN ('h2h','spreads','totals') AND commence_time < ?`)
     .all(new Date(Date.now() - 2 * 3600e3).toISOString());
   if (!pending.length) return { graded: 0, errors: [] };
   const errors = [];
@@ -302,16 +316,38 @@ function summary() {
 // Open liability per game, so the bookie can see where the risk is.
 function exposure() {
   return db.prepare(`
-    SELECT l.event_id, l.sport_title, l.home_team, l.away_team, l.commence_time, l.market, l.selection, l.point,
+    SELECT l.event_id, l.sport_title, l.home_team, l.away_team, l.commence_time, l.market, l.selection, l.point, l.description, l.prop_name,
       COUNT(*) bets, SUM(b.stake_cents) stake_cents,
       SUM(CASE WHEN b.type = 'single' THEN b.potential_payout_cents ELSE 0 END) single_payout_cents
     FROM bet_legs l JOIN bets b ON b.id = l.bet_id
     WHERE b.status = 'pending' AND l.status = 'pending'
-    GROUP BY l.event_id, l.market, l.selection, l.point
+    GROUP BY l.event_id, l.market, l.description, l.prop_id, l.selection, l.point
     ORDER BY l.commence_time, l.event_id`).all();
 }
 
+// Grade every pick on one of the bookie's own props at once: the winning option wins, the rest lose.
+// winner 'void' refunds them all; 'pending' reopens grading.
+function settleCustomProp(propId, winner) {
+  const prop = db.prepare('SELECT * FROM custom_props WHERE id = ?').get(propId);
+  if (!prop) throw new UserError('Prop not found.', 404);
+  const options = JSON.parse(prop.options).map(o => o.name);
+  if (!['void', 'pending'].includes(winner) && !options.includes(winner)) throw new UserError('Pick the option that won.');
+  let graded = 0;
+  tx(() => {
+    for (const leg of db.prepare('SELECT * FROM bet_legs WHERE prop_id = ?').all(propId)) {
+      const status = winner === 'void' || winner === 'pending' ? winner : leg.selection === winner ? 'won' : 'lost';
+      if (leg.status === status) continue;
+      settleLeg(leg.id, status, { by: 'admin', note: winner === 'pending' ? null : `Result: ${winner === 'void' ? 'void' : winner}` });
+      graded++;
+    }
+    db.prepare('UPDATE custom_props SET status = ?, result = ? WHERE id = ?')
+      .run(winner === 'pending' ? 'closed' : 'settled', winner === 'pending' ? null : winner, propId);
+  });
+  return { graded };
+}
+
 module.exports = {
+  settleCustomProp,
   UserError, americanToDecimal, decimalToAmerican, applyTransaction, placeBet, getBet, listBets,
   settleLeg, settleBet, autoGrade, gradeLeg, evaluate, summary, exposure, teasePoint,
 };

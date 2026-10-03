@@ -29,7 +29,12 @@
   const tease = (l, pts) => ({ ...l, point: l.market === 'totals' && l.selection === 'Over' ? Number(l.point) - pts : Number(l.point) + pts });
   const betName = b => b.type === 'parlay' ? `${b.legs.length}-leg parlay` : b.type === 'teaser' ? `${b.legs.length}-leg teaser, ${b.teaser_points} pts` : 'Straight';
 
+  const isPropLeg = l => !MARKET[l.market];
+  const evName = (away, home, title) => (away && home ? `${away} @ ${home}` : title || 'Special');
+  const ouShort = o => (o.name === 'Over' ? 'O' : o.name === 'Under' ? 'U' : o.name) + (o.point != null ? ' ' + o.point : '');
+
   function legLabel(l) {
+    if (isPropLeg(l)) return [l.description, l.propName ?? l.prop_name, l.selection, l.point].filter(x => x != null && x !== '').join(' ');
     if (l.market === 'totals') return `${l.selection} ${l.point}`;
     if (l.market === 'spreads') return `${l.selection} ${pt(l.point)}`;
     return `${l.selection} ML`;
@@ -77,6 +82,7 @@
   const state = {
     me: null, book: null, sports: [], sport: null, events: [], eventsInfo: null,
     slip: loadSlip(), slipMode: 'single', teaserPts: '6', slipOpen: false, placing: false,
+    props: {}, propsOpen: new Set(), propTab: {}, specials: [],
   };
   function loadSlip() { try { return JSON.parse(localStorage.getItem('slip') || '[]'); } catch { return []; } }
   function saveSlip() { try { localStorage.setItem('slip', JSON.stringify(state.slip)); } catch { /* ignore */ } }
@@ -88,7 +94,7 @@
     const r = route();
     const isAdmin = state.me.role === 'admin';
     const links = isAdmin
-      ? [['admin', 'Dashboard'], ['admin/clients', 'Clients'], ['admin/bets', 'Bets'], ['admin/risk', 'Risk'], ['admin/ledger', 'Ledger'], ['admin/settings', 'Settings'], ['odds', 'Odds board'], ['account', 'Account']]
+      ? [['admin', 'Dashboard'], ['admin/clients', 'Clients'], ['admin/bets', 'Bets'], ['admin/props', 'Props'], ['admin/risk', 'Risk'], ['admin/ledger', 'Ledger'], ['admin/settings', 'Settings'], ['odds', 'Odds board'], ['account', 'Account']]
       : [['', 'Odds'], ['bets', 'My bets'], ['account', 'Account']];
     const active = links.map(l => l[0]).filter(k => r === k || (k && r.startsWith(k + '/'))).sort((a, b) => b.length - a.length)[0] ?? '';
     app.innerHTML = `
@@ -182,6 +188,7 @@
       const r = await api('GET', '/api/odds/' + encodeURIComponent(sport));
       if (sport !== state.sport) return;
       state.events = r.events;
+      state.specials = r.specials || [];
       state.eventsInfo = r;
       drawGames();
     } catch (e) {
@@ -189,19 +196,83 @@
     }
   }
 
-  function selKey(eventId, market, selection, point) { return `${eventId}|${market}|${selection}|${point ?? ''}`; }
+  // A pick's identity; props also carry the player/team (description) or the bookie's prop id.
+  function keyOf(p) {
+    if (isPropLeg(p)) return `${p.eventId}|${p.market}|${p.propId ?? p.description ?? ''}|${p.selection}|${p.point ?? ''}`;
+    return `${p.eventId}|${p.market}|${p.selection}|${p.point ?? ''}`;
+  }
+  // Only one pick per game and market (per player for props); picking the other side replaces it.
+  const groupOf = p => `${p.eventId}|${p.market}|${isPropLeg(p) ? (p.propId ?? p.description ?? '') : ''}`;
+
+  const picks = new Map(); // key -> pick, for everything drawn on the board
+  function cell(p, top) {
+    p.key = keyOf(p);
+    picks.set(p.key, p);
+    const on = state.slip.some(s => s.key === p.key);
+    return `<div class="odd ${on ? 'on' : ''}" data-pick="${esc(p.key)}">${top ? `<span class="pt">${esc(top)}</span>` : ''}<span class="pr">${odds(p.price)}</span></div>`;
+  }
+  const evInfo = ev => ({ eventId: ev.id, sportKey: ev.sport_key, away: ev.away_team, home: ev.home_team, commence: ev.commence_time, sportTitle: ev.sport_title });
 
   function oddCell(ev, market, outcome) {
     if (!outcome) return `<div class="odd na">–</div>`;
-    const key = selKey(ev.id, market, outcome.name, outcome.point);
-    const on = state.slip.some(s => s.key === key);
     const top = market === 'spreads' ? pt(outcome.point) : market === 'totals' ? (outcome.name === 'Over' ? 'O ' : 'U ') + outcome.point : '';
-    return `<div class="odd ${on ? 'on' : ''}" data-pick="${esc(key)}">${top ? `<span class="pt">${esc(top)}</span>` : ''}<span class="pr">${odds(outcome.price)}</span></div>`;
+    return cell({ ...evInfo(ev), market, selection: outcome.name, point: outcome.point, price: outcome.price }, top);
+  }
+
+  function customBlock(c, info) {
+    return `<div class="prop-row"><div class="prop-q">${esc(c.question)}</div>
+      <div class="prop-odds wrap">${c.options.map(o => cell({ ...info, market: 'custom', propId: c.id, propName: c.question, selection: o.name, point: null, price: o.price }, o.name)).join('')}</div></div>`;
+  }
+
+  function propsPanel(ev) {
+    const d = state.props[ev.id];
+    if (!d) return '<div class="props"><div class="muted small">Loading props…</div></div>';
+    if (d.error) return `<div class="props"><div class="muted small">${esc(d.error)}</div></div>`;
+    const tabs = [...(d.custom.length ? [['custom', 'Specials']] : []), ...d.markets.map(m => [m.key, m.title])];
+    if (!tabs.length) return '<div class="props"><div class="muted small">No props for this game right now.</div></div>';
+    const tab = tabs.some(t => t[0] === state.propTab[ev.id]) ? state.propTab[ev.id] : tabs[0][0];
+    let body = '';
+    if (tab === 'custom') body = d.custom.map(c => customBlock(c, evInfo(ev))).join('');
+    else {
+      const m = d.markets.find(x => x.key === tab);
+      const rows = new Map();
+      for (const o of m.outcomes) { const k = o.description || ''; if (!rows.has(k)) rows.set(k, []); rows.get(k).push(o); }
+      for (const [desc, outs] of rows) {
+        body += `<div class="prop-row"><div class="team">${esc(desc || m.title)}</div><div class="prop-odds">${outs.map(o =>
+          cell({ ...evInfo(ev), market: m.key, description: o.description, propName: m.title, selection: o.name, point: o.point, price: o.price }, ouShort(o))).join('')}</div></div>`;
+      }
+    }
+    return `<div class="props"><div class="sports prop-tabs">${tabs.map(([k, t]) => `<button class="chip sm ${k === tab ? 'on' : ''}" data-ptab="${esc(ev.id)}|${esc(k)}">${esc(t)}</button>`).join('')}</div>
+      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo props)' : ''}. Props are straight bets only.</p>` : ''}</div>`;
+  }
+
+  async function toggleProps(ev) {
+    if (state.propsOpen.has(ev.id)) { state.propsOpen.delete(ev.id); drawGames(); return; }
+    state.propsOpen.add(ev.id);
+    drawGames();
+    try { state.props[ev.id] = await api('GET', `/api/props/${encodeURIComponent(ev.sport_key)}/${encodeURIComponent(ev.id)}`); }
+    catch (e) { state.props[ev.id] = { error: e.message }; }
+    drawGames();
+  }
+
+  function drawSpecials(games) {
+    if (!state.specials.length) { games.innerHTML = '<div class="empty">No specials right now.</div>'; return; }
+    games.innerHTML = state.specials.map(c => `<div class="game">
+      <div class="game-head"><span>${esc(c.sportTitle || 'Special')}</span><span>Closes ${esc(when(c.commenceTime))}</span></div>
+      <div class="props" style="border:0">${customBlock(c, { eventId: c.eventId, sportKey: c.sportKey, away: null, home: null, commence: c.commenceTime, sportTitle: c.sportTitle })}</div></div>`).join('');
   }
 
   function drawGames() {
     const games = $('#games');
     if (!games) return;
+    picks.clear();
+    if (state.sport === 'specials') drawSpecials(games);
+    else drawEvents(games);
+    if (state.me.role === 'admin') return;
+    $$('[data-pick]', games).forEach(el => el.onclick = () => togglePick(el.dataset.pick));
+  }
+
+  function drawEvents(games) {
     const evs = state.events;
     if (!evs.length) { games.innerHTML = '<div class="empty">No upcoming games with odds for this sport right now.</div>'; return; }
     let html = '';
@@ -212,36 +283,34 @@
       const m = ev.markets;
       const find = (mk, name) => (m[mk] || []).find(o => o.name === name);
       html += `<div class="game">
-        <div class="game-head"><span>${esc(timeOnly(ev.commence_time))}</span><span>${esc(ev.bookmaker || '')}</span></div>
+        <div class="game-head"><span>${esc(timeOnly(ev.commence_time))}</span><span>${esc(ev.bookmaker || '')}${ev.hasProps ? ` <button class="linkbtn" data-props="${esc(ev.id)}">${state.propsOpen.has(ev.id) ? 'Hide props' : 'Props'}</button>` : ''}</span></div>
         <div class="lines">
           <div></div><div class="hdr">Spread</div><div class="hdr">Money</div><div class="hdr">Total</div>
           <div class="team">${esc(ev.away_team)}</div>
           ${oddCell(ev, 'spreads', find('spreads', ev.away_team))}${oddCell(ev, 'h2h', find('h2h', ev.away_team))}${oddCell(ev, 'totals', find('totals', 'Over'))}
           <div class="team">${esc(ev.home_team)}</div>
           ${oddCell(ev, 'spreads', find('spreads', ev.home_team))}${oddCell(ev, 'h2h', find('h2h', ev.home_team))}${oddCell(ev, 'totals', find('totals', 'Under'))}
-        </div></div>`;
+        </div>${state.propsOpen.has(ev.id) ? propsPanel(ev) : ''}</div>`;
     }
     const info = state.eventsInfo;
     if (info && info.fetchedAt) html += `<p class="muted small">Odds updated ${esc(new Date(info.fetchedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))}${info.source === 'demo' ? ' (demo odds)' : ''}.</p>`;
     games.innerHTML = html;
-    if (state.me.role === 'admin') return;
-    $$('[data-pick]', games).forEach(el => el.onclick = () => togglePick(el.dataset.pick));
+    $$('[data-props]', games).forEach(b => b.onclick = () => toggleProps(evs.find(e => e.id === b.dataset.props)));
+    $$('[data-ptab]', games).forEach(b => b.onclick = () => {
+      const i = b.dataset.ptab.lastIndexOf('|');
+      state.propTab[b.dataset.ptab.slice(0, i)] = b.dataset.ptab.slice(i + 1);
+      drawGames();
+    });
   }
 
   function togglePick(key) {
     const i = state.slip.findIndex(s => s.key === key);
     if (i >= 0) state.slip.splice(i, 1);
     else {
-      const [eventId, market, selection] = key.split('|');
-      const ev = state.events.find(e => e.id === eventId);
-      const out = ev && (ev.markets[market] || []).find(o => selKey(ev.id, market, o.name, o.point) === key);
-      if (!out) return;
-      // One pick per game per market; picking the other side replaces it.
-      state.slip = state.slip.filter(s => !(s.eventId === eventId && s.market === market));
-      state.slip.push({
-        key, eventId, sportKey: ev.sport_key, market, selection, point: out.point, price: out.price, stake: '',
-        away: ev.away_team, home: ev.home_team, commence: ev.commence_time, sportTitle: ev.sport_title,
-      });
+      const p = picks.get(key);
+      if (!p) return;
+      state.slip = state.slip.filter(s => groupOf(s) !== groupOf(p));
+      state.slip.push({ ...p, stake: '' });
       if (state.slip.length === 1 && window.innerWidth <= 900) state.slipOpen = true;
     }
     saveSlip();
@@ -254,7 +323,8 @@
     const fab = $('#slipFab');
     if (!el) return;
     const s = state.slip;
-    const parlayOk = s.length >= 2 && new Set(s.map(x => x.eventId)).size === s.length;
+    const hasProps = s.some(isPropLeg);
+    const parlayOk = s.length >= 2 && !hasProps && new Set(s.map(x => x.eventId)).size === s.length;
     const teaserRow = (state.book.teaserOdds || {})[state.teaserPts] || {};
     const teaserOk = parlayOk && s.every(teaseOk) && !!teaserRow[s.length];
     if (state.slipMode === 'parlay' && !parlayOk) state.slipMode = 'single';
@@ -283,7 +353,7 @@
       return `<div class="slip-leg ${l.changed ? 'changed' : ''}">
         <button class="x" data-rm="${i}" aria-label="Remove">×</button>
         <div class="sel">${sel}</div>
-        <div class="ev">${esc(l.away)} @ ${esc(l.home)} · ${esc(MARKET[l.market])}</div>
+        <div class="ev">${esc(evName(l.away, l.home, l.sportTitle))} · ${esc(MARKET[l.market] || 'Prop')}</div>
         ${l.changed ? `<div class="small" style="color:var(--warn)">Odds changed</div>` : ''}
         ${mode === 'single' ? `<input type="number" inputmode="decimal" min="0" step="0.01" placeholder="Stake $" data-stake="${i}" value="${esc(l.stake)}">
           <div class="small muted" data-win="${i}">${st ? 'To win ' + money(Math.floor(st * (dec(l.price) - 1) * 100)) : ''}</div>` : ''}
@@ -298,7 +368,7 @@
       <div class="row between" style="margin-bottom:10px"><h3 style="margin:0">Bet slip</h3>
         <div class="row" style="gap:6px"><button class="btn sm" id="slipClear">Clear</button><button class="btn sm slip-close" id="slipClose">Hide</button></div></div>
       ${s.length >= 2 ? `<div class="tabs"><button data-slipmode="single" class="${mode === 'single' ? 'on' : ''}">Straight bets</button>
-        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : 'disabled title="Only one pick per game in a parlay"'}>Parlay</button>
+        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : `disabled title="${hasProps ? 'Props are straight bets only' : 'Only one pick per game in a parlay'}"`}>Parlay</button>
         <button data-slipmode="teaser" class="${mode === 'teaser' ? 'on' : ''}" ${teaserOk ? '' : 'disabled title="Teasers are 2 to 6 football or basketball spreads and totals, one per game"'}>Teaser</button></div>` : ''}
       ${mode === 'teaser' ? `<div class="tabs">${['6', '6.5', '7'].map(p => `<button data-teaserpts="${p}" class="${state.teaserPts === p ? 'on' : ''}">${p} pts</button>`).join('')}</div>` : ''}
       ${legsHtml}
@@ -341,10 +411,11 @@
 
   function applyChanges(changed) {
     for (const c of changed || []) {
-      const i = state.slip.findIndex(s => s.eventId === c.eventId && s.market === c.market && s.selection === c.selection);
+      const i = state.slip.findIndex(s => groupOf(s) === groupOf(c) && s.selection === c.selection);
       if (i < 0) continue;
       if (c.removed) { state.slip.splice(i, 1); continue; }
-      Object.assign(state.slip[i], { price: c.price, point: c.point, changed: true, key: selKey(c.eventId, c.market, c.selection, c.point) });
+      Object.assign(state.slip[i], { price: c.price, point: c.point, changed: true });
+      state.slip[i].key = keyOf(state.slip[i]);
     }
     saveSlip();
   }
@@ -352,7 +423,7 @@
   async function placeBets() {
     const err = $('#slipErr');
     err.textContent = '';
-    const legOf = l => ({ eventId: l.eventId, sportKey: l.sportKey, market: l.market, selection: l.selection, point: l.point, price: l.price });
+    const legOf = l => ({ eventId: l.eventId, sportKey: l.sportKey, market: l.market, selection: l.selection, point: l.point, price: l.price, description: l.description ?? null, propId: l.propId ?? null });
     const jobs = state.slipMode !== 'single'
       ? [{ type: state.slipMode, stake: state.parlayStake, legs: state.slip.map(legOf), keys: state.slip.map(l => l.key), teaserPoints: Number(state.teaserPts) }]
       : state.slip.map(l => ({ type: 'single', stake: l.stake, legs: [legOf(l)], keys: [l.key] }));
@@ -386,7 +457,7 @@
     const legs = b.legs.map(l => `
       <div class="leg"><div>
         <div class="sel">${esc(legLabel(l))} ${b.type === 'teaser' ? `<span class="muted small">from ${esc(l.market === 'totals' ? l.orig_point : pt(l.orig_point))}</span>` : `<span class="num muted">${odds(l.price)}</span>`}</div>
-        <div class="small muted">${esc(l.sport_title || '')} · ${esc(l.away_team)} @ ${esc(l.home_team)} · ${esc(when(l.commence_time))}</div>
+        <div class="small muted">${l.away_team ? `${esc(l.sport_title || '')} · ${esc(l.away_team)} @ ${esc(l.home_team)}` : esc(l.sport_title || 'Special')} · ${esc(when(l.commence_time))}${isPropLeg(l) ? ' · Prop' : ''}</div>
         ${l.result_note ? `<div class="small muted">${esc(l.result_note)}</div>` : ''}
       </div>
       <div style="text-align:right">${b.type !== 'single' ? `<span class="pill ${l.status}">${l.status}</span>` : ''}
@@ -590,8 +661,8 @@
   async function renderAdminBets() {
     const tab = state.adminBetsTab || 'open';
     const view = shell(`<div class="row between"><h1>Bets</h1><button class="btn" id="grade">Grade finished games</button></div>
-      <div class="tabs" style="max-width:420px"><button data-t="open" class="${tab === 'open' ? 'on' : ''}">Open</button><button data-t="settled" class="${tab === 'settled' ? 'on' : ''}">Settled</button><button data-t="" class="${tab === '' ? 'on' : ''}">All</button></div>
-      <p class="muted small">Games are graded automatically from final scores every 15 minutes when the feed has them. Use the buttons on each pick to grade by hand or fix a result; credit is corrected automatically.</p>
+      <div class="tabs" style="max-width:560px"><button data-t="open" class="${tab === 'open' ? 'on' : ''}">Open</button><button data-t="props" class="${tab === 'props' ? 'on' : ''}">Props to grade</button><button data-t="settled" class="${tab === 'settled' ? 'on' : ''}">Settled</button><button data-t="" class="${tab === '' ? 'on' : ''}">All</button></div>
+      <p class="muted small">Games are graded automatically from final scores every 15 minutes when the feed has them. Props are never graded automatically (the feed has no player stats): grade them here with the buttons on each pick, or grade your own props in one go under <a href="#/admin/props">Props</a>. Use the buttons to fix any result; credit is corrected automatically.</p>
       <div id="list"><div class="empty">Loading…</div></div>`);
     $$('[data-t]', view).forEach(b => b.onclick = () => { state.adminBetsTab = b.dataset.t; renderAdminBets(); });
     $('#grade', view).onclick = async () => {
@@ -608,13 +679,117 @@
     wireSettle(list, renderAdminBets);
   }
 
+  async function renderAdminProps() {
+    const view = shell(`<div class="row between"><h1>Props</h1><button class="btn primary" id="newProp">New prop</button></div>
+      <p class="muted small">Write your own props, on a game or as a stand-alone special (awards, futures, anything). Clients see them under the game's Props, or under Specials. When it's decided, pick the winner and every bet on it is graded. Props from the odds feed are graded under <a href="#/admin/bets">Bets</a>.</p>
+      <div id="list"><div class="empty">Loading…</div></div>`);
+    $('#newProp', view).onclick = () => newPropModal(renderAdminProps);
+    const { props } = await api('GET', '/api/admin/props');
+    const list = $('#list', view);
+    if (!props.length) { list.innerHTML = '<div class="empty">No props yet.</div>'; return; }
+    list.innerHTML = props.map(p => {
+      const closed = p.status !== 'open' || Date.parse(p.commenceTime) <= Date.now();
+      const status = p.status === 'settled' ? 'settled' : closed ? 'closed' : 'open';
+      return `<div class="bet">
+        <div class="bet-head"><div><b>${esc(p.question)}</b><div class="small muted">${esc(evName(p.awayTeam, p.homeTeam, p.sportTitle))} · ${p.sportKey === 'specials' ? 'closes' : 'starts'} ${esc(when(p.commenceTime))}</div></div>
+          <span class="pill ${status === 'settled' ? 'won' : status === 'open' ? 'pending' : ''}">${status}</span></div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;margin:8px 0">${p.options.map(o => `<span class="pill" style="text-transform:none">${esc(o.name)} ${odds(o.price)}${p.result === o.name ? ' ✓' : ''}</span>`).join('')}</div>
+        <div class="bet-foot"><span>${p.bets} bet${p.bets === 1 ? '' : 's'} · ${money(p.stakeCents)} staked</span>
+          ${p.status === 'settled' ? `<span>Result <b>${esc(p.result)}</b></span><button class="btn sm" data-regrade="${p.id}">Undo grading</button>` : `
+            ${p.status === 'open' ? `<button class="btn sm" data-pstatus="${p.id}|closed">Stop taking bets</button>` : `<button class="btn sm" data-pstatus="${p.id}|open">Reopen</button>`}
+            ${p.bets ? `<span class="settle">${p.options.map(o => `<button class="btn sm" data-pwin="${p.id}" data-opt="${esc(o.name)}">${esc(o.name)} won</button>`).join('')}<button class="btn sm danger" data-pwin="${p.id}" data-opt="void">Void</button></span>`
+              : `<button class="btn sm danger" data-pdel="${p.id}">Delete</button>`}`}
+        </div></div>`;
+    }).join('');
+    const act = async (fn, msg) => { try { const r = await fn(); toast(typeof msg === 'function' ? msg(r) : msg); renderAdminProps(); } catch (e) { toast(e.message, true); } };
+    $$('[data-pstatus]', list).forEach(b => b.onclick = () => {
+      const [id, status] = b.dataset.pstatus.split('|');
+      act(() => api('PATCH', `/api/admin/props/${id}`, { status }), status === 'open' ? 'Prop reopened.' : 'Prop closed to new bets.');
+    });
+    $$('[data-pwin]', list).forEach(b => b.onclick = () => {
+      const opt = b.dataset.opt;
+      if (!confirm(opt === 'void' ? 'Void every bet on this prop and refund the stakes?' : `Grade "${opt}" as the winner? Every other option loses.`)) return;
+      act(() => api('POST', `/api/admin/props/${b.dataset.pwin}/settle`, { winner: opt }), r => `Graded ${r.graded} bet${r.graded === 1 ? '' : 's'}.`);
+    });
+    $$('[data-regrade]', list).forEach(b => b.onclick = () => {
+      if (!confirm('Put every bet on this prop back to pending? Credit paid out is taken back until you grade it again.')) return;
+      act(() => api('POST', `/api/admin/props/${b.dataset.regrade}/settle`, { winner: 'pending' }), 'Grading undone.');
+    });
+    $$('[data-pdel]', list).forEach(b => b.onclick = () => {
+      if (!confirm('Delete this prop?')) return;
+      act(() => api('DELETE', `/api/admin/props/${b.dataset.pdel}`), 'Prop deleted.');
+    });
+  }
+
+  function newPropModal(done) {
+    const optRow = (name = '', price = '') => `<div class="row opt" style="gap:8px;margin-bottom:8px"><input type="text" class="grow" style="width:auto" placeholder="Option, e.g. Yes" value="${esc(name)}" data-oname>
+      <input type="text" inputmode="numeric" style="width:110px" placeholder="Odds, e.g. +250" value="${esc(price)}" data-oprice></div>`;
+    const local = d => new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
+    modal(`<div class="modal-head"><h2>New prop</h2><button class="btn sm" data-close>Close</button></div>
+      <form id="np">
+        <div class="tabs"><button type="button" data-kind="game" class="on">On a game</button><button type="button" data-kind="special">Stand-alone special</button></div>
+        <div id="kGame" class="grid2">
+          <label class="field"><span>Sport</span><select id="pSport"></select></label>
+          <label class="field"><span>Game</span><select id="pGame"><option value="">Loading…</option></select></label>
+        </div>
+        <div id="kSpecial" class="grid2 hidden">
+          <label class="field"><span>Event (shown to clients)</span><input type="text" id="pEvent" placeholder="e.g. NFL Awards"></label>
+          <label class="field"><span>Betting closes</span><input type="datetime-local" id="pCloses" value="${local(new Date(Date.now() + 7 * 86400e3))}"></label>
+        </div>
+        <label class="field"><span>Prop</span><input type="text" id="pQ" placeholder="e.g. Will the game go to overtime?" required></label>
+        <div class="small muted" style="margin-bottom:6px">Options and their odds (American, like -150 or +300). Leave a row blank to skip it.</div>
+        <div id="opts">${optRow('Yes')}${optRow('No')}</div>
+        <button type="button" class="btn sm" id="addOpt" style="margin-bottom:12px">Add option</button>
+        <div class="error" id="npErr"></div><button class="btn primary">Create prop</button>
+      </form>`, async (root, close) => {
+      let kind = 'game';
+      $$('[data-kind]', root).forEach(b => b.onclick = () => {
+        kind = b.dataset.kind;
+        $$('[data-kind]', root).forEach(x => x.classList.toggle('on', x === b));
+        $('#kGame', root).classList.toggle('hidden', kind !== 'game');
+        $('#kSpecial', root).classList.toggle('hidden', kind !== 'special');
+      });
+      $('#addOpt', root).onclick = () => $('#opts', root).insertAdjacentHTML('beforeend', optRow());
+      const sportSel = $('#pSport', root), gameSel = $('#pGame', root);
+      const loadGamesFor = async () => {
+        gameSel.innerHTML = '<option value="">Loading…</option>';
+        try {
+          const { events } = await api('GET', '/api/odds/' + encodeURIComponent(sportSel.value));
+          gameSel.innerHTML = events.length ? events.map(e => `<option value="${esc(e.id)}">${esc(e.away_team)} @ ${esc(e.home_team)} · ${esc(when(e.commence_time))}</option>`).join('') : '<option value="">No upcoming games</option>';
+        } catch (e) { gameSel.innerHTML = `<option value="">${esc(e.message)}</option>`; }
+      };
+      try {
+        const { sports } = await api('GET', '/api/sports');
+        sportSel.innerHTML = sports.filter(x => x.key !== 'specials').map(x => `<option value="${esc(x.key)}">${esc(x.title)}</option>`).join('');
+        sportSel.onchange = loadGamesFor;
+        if (sportSel.value) loadGamesFor(); else gameSel.innerHTML = '<option value="">No sports open</option>';
+      } catch (e) { toast(e.message, true); }
+      $('#np', root).onsubmit = async e => {
+        e.preventDefault();
+        const body = {
+          question: $('#pQ', root).value,
+          options: $$('.opt', root).map(r => ({ name: $('[data-oname]', r).value.trim(), price: $('[data-oprice]', r).value.trim() })).filter(o => o.name || o.price),
+        };
+        if (kind === 'game') {
+          if (!gameSel.value) { $('#npErr', root).textContent = 'Pick a game.'; return; }
+          Object.assign(body, { sportKey: sportSel.value, eventId: gameSel.value });
+        } else {
+          const c = $('#pCloses', root).value;
+          Object.assign(body, { eventName: $('#pEvent', root).value, closesAt: c ? new Date(c).toISOString() : '' });
+        }
+        try { await api('POST', '/api/admin/props', body); close(); toast('Prop created.'); state.sports = []; done(); }
+        catch (err) { $('#npErr', root).textContent = err.message; }
+      };
+    });
+  }
+
   async function renderRisk() {
     const view = shell('<h1>Risk</h1><p class="muted small">Open action by game and side. Straight-bet payout is what you pay if that side wins; parlays and teasers are counted in stake only.</p><div class="panel"><div class="table-wrap" id="r">Loading…</div></div>');
     const { exposure } = await api('GET', '/api/admin/exposure');
     if (!exposure.length) { $('#r', view).innerHTML = '<div class="muted">No open action.</div>'; return; }
     $('#r', view).innerHTML = `<table><thead><tr><th>Game</th><th>Pick</th><th class="r">Bets</th><th class="r">Staked</th><th class="r">Straight payout</th></tr></thead><tbody>
-      ${exposure.map(x => `<tr><td><b>${esc(x.away_team)} @ ${esc(x.home_team)}</b><div class="small muted">${esc(x.sport_title || '')} · ${esc(when(x.commence_time))}</div></td>
-        <td>${esc(legLabel(x))}<div class="small muted">${esc(MARKET[x.market])}</div></td><td class="r num">${x.bets}</td>
+      ${exposure.map(x => `<tr><td><b>${esc(evName(x.away_team, x.home_team, x.sport_title))}</b><div class="small muted">${esc(x.sport_title || '')} · ${esc(when(x.commence_time))}</div></td>
+        <td>${esc(legLabel(x))}<div class="small muted">${esc(MARKET[x.market] || 'Prop')}</div></td><td class="r num">${x.bets}</td>
         <td class="r num">${money(x.stake_cents)}</td><td class="r num">${money(x.single_payout_cents)}</td></tr>`).join('')}
     </tbody></table>`;
   }
@@ -667,6 +842,9 @@
           <label class="field"><span>Stop refreshing when fewer requests than this remain</span><input type="number" min="0" name="odds_quota_floor" value="${esc(s.odds_quota_floor)}"></label>
         </div>
         <label class="field"><span>Sportsbooks to copy lines from, in order of preference</span><input type="text" name="bookmakers" value="${esc(s.bookmakers)}"></label>
+        <label class="check"><input type="checkbox" name="props_enabled" ${s.props_enabled === '1' ? 'checked' : ''}> Offer player and game props from the feed (NFL, NBA, MLB, NHL)</label>
+        <label class="field"><span>Refresh a game's props every (minutes)</span><input type="number" min="1" name="props_ttl_minutes" value="${esc(s.props_ttl_minutes)}"></label>
+        <p class="small muted" style="margin-top:0">Props load only when someone opens a game's props, and each load uses about 6 requests (one per prop market). The free plan's 500 a month runs out quickly; the $30 plan (20,000 a month) is plenty for a small book. Your own props under <a href="#/admin/props">Props</a> use no requests.</p>
         <button type="button" class="btn" id="refresh">Refresh odds now</button>
       </div>
       <div class="panel"><h3>Sports on the board</h3>
@@ -716,6 +894,7 @@
         if (r === 'admin/clients') return await renderClients();
         if (r.startsWith('admin/clients/')) return await renderClient(r.split('/')[2]);
         if (r === 'admin/bets') return await renderAdminBets();
+        if (r === 'admin/props') return await renderAdminProps();
         if (r === 'admin/risk') return await renderRisk();
         if (r === 'admin/ledger') return await renderLedger();
         if (r === 'admin/settings') return await renderSettings();
