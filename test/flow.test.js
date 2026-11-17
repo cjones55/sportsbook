@@ -349,9 +349,12 @@ test('props from the feed (demo) are graded by the bookie', async () => {
   const other = nba[1];
   const teaser = await joe('POST', '/api/bets', { type: 'teaser', teaserPoints: 6, stake: 10, legs: [leg, pick(other, 'spreads')] });
   assert.equal(teaser.status, 400);
+  // Same-game parlays: with the setting off, one pick per game.
+  await admin('PATCH', '/api/admin/settings', { same_game_parlays: '0' });
   const sameGame = await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [leg, pick(ev, 'h2h')] });
   assert.equal(sameGame.status, 400);
   assert.match(sameGame.body.error, /one selection per game/);
+  await admin('PATCH', '/api/admin/settings', { same_game_parlays: '1' });
 
   const placed = await joe('POST', '/api/bets', { type: 'single', stake: 20, legs: [leg] });
   assert.equal(placed.status, 200, JSON.stringify(placed.body));
@@ -483,4 +486,36 @@ test('first TD props, and props in parlays wait for the bookie', async () => {
   const b2 = (await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [tdLeg2, pick(nfl[1], 'h2h')] })).body.bet;
   bets.settleLeg(b2.legs.find(l => l.market === 'h2h').id, 'lost', { by: 'auto' });
   assert.equal(bets.getBet(b2.id).status, 'lost');
+});
+
+test('same-game parlays: props and lines from one game, but not both sides', async () => {
+  const joe = client();
+  await joe('POST', '/api/login', { username: 'joe', password: 'secret1' });
+  const joeRow = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  bets.applyTransaction(joeRow.id, 50000, 'deposit');
+  assert.equal((await joe('GET', '/api/me')).body.book.sameGameParlays, true);
+  const ev = (await joe('GET', '/api/odds/americanfootball_nfl')).body.events[2];
+  const mk = (await joe('GET', `/api/props/${ev.sport_key}/${ev.id}`)).body.markets;
+  const legOf = (key, i = 0) => { const o = mk.find(m => m.key === key).outcomes[i]; return { eventId: ev.id, sportKey: ev.sport_key, market: key, selection: o.name, point: o.point, price: o.price, description: o.description }; };
+  const td = legOf('player_1st_td');
+  const yds = legOf('player_pass_yds');
+  const ok = await joe('POST', '/api/bets', { type: 'parlay', stake: 5, legs: [td, yds, pick(ev, 'h2h'), pick(ev, 'totals')] });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.bet.legs.length, 4);
+  // Over and Under on the same player's yards.
+  const under = { ...yds, ...(() => { const o = mk.find(m => m.key === 'player_pass_yds').outcomes.find(x => x.description === yds.description && x.name !== yds.selection); return { selection: o.name, price: o.price, point: o.point }; })() };
+  const both = await joe('POST', '/api/bets', { type: 'parlay', stake: 5, legs: [yds, under] });
+  assert.equal(both.status, 400);
+  assert.match(both.body.error, /one side/);
+  // Two first TD scorers in one game can't both happen.
+  const twoTd = await joe('POST', '/api/bets', { type: 'parlay', stake: 5, legs: [td, legOf('player_1st_td', 1)] });
+  assert.equal(twoTd.status, 400);
+  assert.match(twoTd.body.error, /first touchdown/);
+  // Moneyline plus spread on the same game.
+  const mlSpread = await joe('POST', '/api/bets', { type: 'parlay', stake: 5, legs: [pick(ev, 'h2h'), pick(ev, 'spreads')] });
+  assert.equal(mlSpread.status, 400);
+  assert.match(mlSpread.body.error, /moneyline and a spread/);
+  // Teasers stay one per game.
+  const teaser = await joe('POST', '/api/bets', { type: 'teaser', teaserPoints: 6, stake: 5, legs: [pick(ev, 'spreads'), pick(ev, 'totals')] });
+  assert.equal(teaser.status, 400);
 });

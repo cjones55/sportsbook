@@ -201,6 +201,15 @@
     if (isPropLeg(p)) return `${p.eventId}|${p.market}|${p.propId ?? p.description ?? ''}|${p.selection}|${p.point ?? ''}`;
     return `${p.eventId}|${p.market}|${p.selection}|${p.point ?? ''}`;
   }
+  // Same rules as the server's parlayConflict (src/bets.js).
+  function parlayConflict(legs, sameGame) {
+    if (!sameGame) return new Set(legs.map(l => l.eventId)).size === legs.length ? null : 'only one pick per game.';
+    const has = (ev, m) => legs.some(l => l.eventId === ev && l.market === m);
+    if (new Set(legs.map(groupOf)).size !== legs.length) return 'only one side of each bet.';
+    if (legs.some(l => l.market === 'player_1st_td' && legs.filter(x => x.eventId === l.eventId && x.market === 'player_1st_td').length > 1)) return 'only one first touchdown scorer per game.';
+    if (legs.some(l => has(l.eventId, 'h2h') && has(l.eventId, 'spreads'))) return "a moneyline and a spread from the same game can't be combined.";
+    return null;
+  }
   // Only one pick per game and market (per player for props); picking the other side replaces it.
   const groupOf = p => `${p.eventId}|${p.market}|${isPropLeg(p) ? (p.propId ?? p.description ?? '') : ''}`;
 
@@ -243,7 +252,7 @@
       }
     }
     return `<div class="props"><div class="sports prop-tabs">${tabs.map(([k, t]) => `<button class="chip sm ${k === tab ? 'on' : ''}" data-ptab="${esc(ev.id)}|${esc(k)}">${esc(t)}</button>`).join('')}</div>
-      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo props)' : ''}. Props can go in parlays, one pick per game.</p>` : ''}</div>`;
+      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo props)' : ''}. Props can go in parlays${state.book.sameGameParlays ? ', including with other picks from this game' : ', one pick per game'}.</p>` : ''}</div>`;
   }
 
   async function toggleProps(ev) {
@@ -324,9 +333,11 @@
     if (!el) return;
     const s = state.slip;
     const hasProps = s.some(isPropLeg);
-    const parlayOk = s.length >= 2 && new Set(s.map(x => x.eventId)).size === s.length;
+    const parlayWhy = s.length >= 2 ? parlayConflict(s, !!state.book.sameGameParlays) : null;
+    const parlayOk = s.length >= 2 && !parlayWhy;
+    const oneEach = new Set(s.map(x => x.eventId)).size === s.length;
     const teaserRow = (state.book.teaserOdds || {})[state.teaserPts] || {};
-    const teaserOk = parlayOk && !hasProps && s.every(teaseOk) && !!teaserRow[s.length];
+    const teaserOk = s.length >= 2 && oneEach && !hasProps && s.every(teaseOk) && !!teaserRow[s.length];
     if (state.slipMode === 'parlay' && !parlayOk) state.slipMode = 'single';
     if (state.slipMode === 'teaser' && !teaserOk) state.slipMode = 'single';
     if (fab) {
@@ -368,8 +379,9 @@
       <div class="row between" style="margin-bottom:10px"><h3 style="margin:0">Bet slip</h3>
         <div class="row" style="gap:6px"><button class="btn sm" id="slipClear">Clear</button><button class="btn sm slip-close" id="slipClose">Hide</button></div></div>
       ${s.length >= 2 ? `<div class="tabs"><button data-slipmode="single" class="${mode === 'single' ? 'on' : ''}">Straight bets</button>
-        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : `disabled title="Only one pick per game in a parlay"`}>Parlay</button>
+        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : `disabled title="${esc(parlayWhy || '')}"`}>Parlay</button>
         <button data-slipmode="teaser" class="${mode === 'teaser' ? 'on' : ''}" ${teaserOk ? '' : 'disabled title="Teasers are 2 to 6 football or basketball spreads and totals, one per game"'}>Teaser</button></div>` : ''}
+      ${parlayWhy && mode === 'single' ? `<p class="small muted" style="margin:-4px 0 10px">Parlay is off: ${esc(parlayWhy)}</p>` : ''}
       ${mode === 'teaser' ? `<div class="tabs">${['6', '6.5', '7'].map(p => `<button data-teaserpts="${p}" class="${state.teaserPts === p ? 'on' : ''}">${p} pts</button>`).join('')}</div>` : ''}
       ${legsHtml}
       ${mode === 'parlay' || mode === 'teaser' ? `<div class="slip-total"><span>${s.length}-leg ${mode}</span><b class="num">${decToAm(parlayDec)}</b></div>
@@ -819,6 +831,7 @@
         <label class="field"><span>Minimum bet ($)</span><input type="number" step="0.01" min="0" data-cents="min_bet_cents" value="${d(s.min_bet_cents)}"></label>
         <label class="field"><span>Maximum bet ($)</span><input type="number" step="0.01" min="0" data-cents="max_bet_cents" value="${d(s.max_bet_cents)}"></label>
         <label class="field"><span>Maximum payout per bet ($)</span><input type="number" step="0.01" min="0" data-cents="max_payout_cents" value="${d(s.max_payout_cents)}"></label>
+        <label class="check" style="grid-column:1/-1"><input type="checkbox" name="same_game_parlays" ${s.same_game_parlays === '1' ? 'checked' : ''}> Allow same-game parlays (several props and lines from one game in one parlay). Picks from the same game tend to win together, so these favor the bettor a little.</label>
         <label class="field"><span>Maximum parlay legs</span><input type="number" min="2" max="15" name="max_parlay_legs" value="${esc(s.max_parlay_legs)}"></label>
       </div></div>
       <div class="panel"><h3>Teaser payouts</h3>
