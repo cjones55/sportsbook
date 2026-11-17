@@ -161,6 +161,7 @@ const DEFAULT_SETTINGS = {
   max_bet_cents: '50000',
   max_payout_cents: '500000',
   max_parlay_legs: '10',
+  same_game_parlays: '1',
   odds_api_key: '',
   odds_ttl_minutes: '30',
   odds_quota_floor: '25',

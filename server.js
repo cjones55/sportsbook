@@ -74,6 +74,7 @@ function bookInfo() {
     maxBetCents: intSetting('max_bet_cents'),
     maxPayoutCents: intSetting('max_payout_cents'),
     maxParlayLegs: intSetting('max_parlay_legs'),
+    sameGameParlays: getSetting('same_game_parlays') === '1',
     teaserOdds: teaserOdds(),
     demoOdds: !odds.isLive(),
   };
@@ -342,7 +343,7 @@ route('GET', '/api/admin/transactions', { auth: 'admin' }, (req, res, { query })
 
 const EDITABLE = ['book_name', 'betting_open', 'signup_enabled', 'signup_code', 'signup_starting_credit_cents',
   'min_bet_cents', 'max_bet_cents', 'max_payout_cents', 'max_parlay_legs', 'odds_api_key', 'odds_ttl_minutes',
-  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds', 'props_enabled', 'props_ttl_minutes'];
+  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds', 'props_enabled', 'props_ttl_minutes', 'same_game_parlays'];
 
 // Accepts {"6": {"2": -110, "3": 180, ...}, "6.5": {...}, "7": {...}}.
 function cleanTeaserOdds(v) {

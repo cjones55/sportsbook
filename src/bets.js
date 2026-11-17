@@ -48,6 +48,23 @@ function findOutcome(event, market, selection, point) {
   return outs.find(o => o.name === selection && (market === 'h2h' || Number(o.point) === Number(point))) || null;
 }
 
+// Which picks can share a parlay. With same-game parlays off: one pick per game. With them on, a game
+// can have several picks, but not both sides of one market (Over and Under on the same player, both
+// teams' moneylines) and not a moneyline with a spread on the same game.
+function parlayConflict(legs, sameGame) {
+  if (!sameGame) return new Set(legs.map(l => l.eventId)).size === legs.length ? null : 'A parlay can only include one selection per game.';
+  const groups = new Set();
+  for (const l of legs) {
+    const g = `${l.eventId}|${l.market}|${props.isProp(l.market) ? (l.propId ?? l.description ?? '') : ''}`;
+    if (groups.has(g)) return 'A parlay can only include one side of each bet.';
+    groups.add(g);
+  }
+  const has = (ev, m) => legs.some(l => l.eventId === ev && l.market === m);
+  if (legs.some(l => l.market === 'player_1st_td' && legs.filter(x => x.eventId === l.eventId && x.market === 'player_1st_td').length > 1)) return 'A parlay can only include one first touchdown scorer per game.';
+  if (legs.some(l => has(l.eventId, 'h2h') && has(l.eventId, 'spreads'))) return "A parlay can't combine a moneyline and a spread from the same game.";
+  return null;
+}
+
 async function placeBet(user, body) {
   if (getSetting('betting_open') !== '1') throw new UserError('Betting is currently closed.');
   const type = ['parlay', 'teaser'].includes(body.type) ? body.type : 'single';
@@ -59,10 +76,8 @@ async function placeBet(user, body) {
   if (type === 'parlay') {
     if (legsIn.length < 2) throw new UserError('A parlay needs at least 2 selections.');
     if (legsIn.length > intSetting('max_parlay_legs')) throw new UserError(`Parlays are limited to ${intSetting('max_parlay_legs')} selections.`);
-    const ids = new Set(legsIn.map(l => l.eventId));
-    // One pick per game, props included: picks from the same game move together (a QB's yards and his
-    // team winning), so pricing them as independent would overpay.
-    if (ids.size !== legsIn.length) throw new UserError('A parlay can only include one selection per game.');
+    const err = parlayConflict(legsIn, getSetting('same_game_parlays') === '1');
+    if (err) throw new UserError(err);
   }
   let teaserPts = null, teaserRow = null;
   if (type === 'teaser') {
@@ -349,7 +364,7 @@ function settleCustomProp(propId, winner) {
 }
 
 module.exports = {
-  settleCustomProp,
+  settleCustomProp, parlayConflict,
   UserError, americanToDecimal, decimalToAmerican, applyTransaction, placeBet, getBet, listBets,
   settleLeg, settleBet, autoGrade, gradeLeg, evaluate, summary, exposure, teasePoint,
 };
