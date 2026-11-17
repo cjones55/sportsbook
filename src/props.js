@@ -48,7 +48,9 @@ async function feedProps(sportKey, eventId) {
   const row = db.prepare('SELECT * FROM props_cache WHERE event_id = ?').get(eventId);
   const cached = row ? { source: row.source, fetchedAt: row.fetched_at, ...JSON.parse(row.data) } : null;
   const ttl = Math.max(1, intSetting('props_ttl_minutes')) * 60e3;
-  if (cached && Date.now() - cached.fetchedAt < ttl) return cached;
+  // A copy fetched before the market list changed (e.g. First TD was added) is refetched right away.
+  const asked = PROP_MARKETS[sportKey].join(',');
+  if (cached && cached.asked === asked && Date.now() - cached.fetchedAt < ttl) return cached;
   if (odds.quotaTooLow()) return cached;
   if (inflight.has(eventId)) return inflight.get(eventId);
   const p = (async () => {
@@ -59,7 +61,7 @@ async function feedProps(sportKey, eventId) {
         oddsFormat: 'american',
         dateFormat: 'iso',
       });
-      const data = normalize(raw);
+      const data = { ...normalize(raw), asked: PROP_MARKETS[sportKey].join(',') };
       db.prepare(`INSERT INTO props_cache(event_id, sport_key, fetched_at, source, data) VALUES(?, ?, ?, 'live', ?)
         ON CONFLICT(event_id) DO UPDATE SET fetched_at = excluded.fetched_at, source = excluded.source, data = excluded.data`)
         .run(eventId, sportKey, Date.now(), JSON.stringify(data));
