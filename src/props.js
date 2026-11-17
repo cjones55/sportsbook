@@ -11,7 +11,8 @@ const isProp = market => !MAIN_MARKETS.includes(market);
 
 // Markets asked for per league. Each market the feed returns costs one request.
 const PROP_MARKETS = {
-  americanfootball_nfl: ['player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td', 'team_totals'],
+  americanfootball_nfl: ['player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td', 'player_1st_td', 'team_totals'],
+  americanfootball_ncaaf: ['player_pass_yds', 'player_rush_yds', 'player_reception_yds', 'player_anytime_td', 'player_1st_td', 'team_totals'],
   basketball_nba: ['player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_points_rebounds_assists', 'team_totals'],
   baseball_mlb: ['batter_hits', 'batter_home_runs', 'batter_total_bases', 'batter_rbis', 'pitcher_strikeouts', 'team_totals'],
   icehockey_nhl: ['player_points', 'player_goals', 'player_assists', 'player_shots_on_goal', 'player_goal_scorer_anytime', 'team_totals'],
@@ -21,6 +22,7 @@ const TITLES = {
   team_totals: 'Team Total',
   player_pass_yds: 'Passing Yards', player_pass_tds: 'Passing TDs', player_rush_yds: 'Rushing Yards',
   player_reception_yds: 'Receiving Yards', player_receptions: 'Receptions', player_anytime_td: 'Anytime TD',
+  player_1st_td: 'First TD',
   player_points: 'Points', player_rebounds: 'Rebounds', player_assists: 'Assists', player_threes: 'Threes Made',
   player_points_rebounds_assists: 'Pts + Reb + Ast',
   batter_hits: 'Hits', batter_home_runs: 'Home Runs', batter_total_bases: 'Total Bases', batter_rbis: 'RBIs',
@@ -104,6 +106,11 @@ const DEMO = {
   americanfootball_nfl: [
     ['QB', 'player_pass_yds', 245.5, 40], ['QB', 'player_pass_tds', 1.5, 0], ['RB', 'player_rush_yds', 64.5, 20],
     ['WR', 'player_reception_yds', 62.5, 20], ['WR', 'player_receptions', 4.5, 1], ['RB', 'player_anytime_td'], ['WR', 'player_anytime_td'],
+    ['RB', 'player_1st_td'], ['WR', 'player_1st_td'], ['TE', 'player_1st_td'],
+  ],
+  americanfootball_ncaaf: [
+    ['QB', 'player_pass_yds', 235.5, 50], ['RB', 'player_rush_yds', 74.5, 25], ['WR', 'player_reception_yds', 58.5, 20],
+    ['RB', 'player_anytime_td'], ['WR', 'player_anytime_td'], ['RB', 'player_1st_td'], ['WR', 'player_1st_td'],
   ],
   basketball_nba: [
     ['G', 'player_points', 24.5, 6], ['F', 'player_points', 19.5, 5], ['F', 'player_rebounds', 8.5, 2],
@@ -133,7 +140,9 @@ function demoMarkets(event) {
   for (const [pos, key, line, swing] of DEMO[event.sport_key] || []) {
     for (const team of [event.away_team, event.home_team]) {
       const description = `${nick(team)} ${pos}`;
-      if (line === undefined) add(key, { name: 'Yes', description, price: 100 + Math.round(r() * 30) * 10, point: null });
+      // First TD is a long shot (+500 to +1200); anytime TD is around +100 to +400.
+      if (key === 'player_1st_td') add(key, { name: 'Yes', description, price: 500 + Math.round(r() * 14) * 50, point: null });
+      else if (line === undefined) add(key, { name: 'Yes', description, price: 100 + Math.round(r() * 30) * 10, point: null });
       else ou(key, description, swing ? Math.floor(line + (r() - 0.5) * swing) + 0.5 : line);
     }
   }

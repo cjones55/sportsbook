@@ -37,11 +37,13 @@ requests a month and one sport refresh costs about 3, so a busy book will want t
 Bets are checked against the current line when placed; if the price moved, the client is
 shown the new price. Games that already started can't be bet.
 
-**Props**: player and game props for NFL, NBA, MLB and NHL come from the same feed, fetched
+**Props**: player and game props for NFL, college football, NBA, MLB and NHL come from the same feed
+(football includes anytime and first touchdown scorer), fetched
 one game at a time only when someone opens that game's props (cached 60 minutes by default).
-Each load costs about one request per prop market, roughly 6, so props use the free plan's 500
-requests quickly; the $30 plan (20,000 a month) suits a small book. Props are straight bets
-only (no parlays or teasers). Without a key, demo props are shown.
+Each load costs about one request per prop market, roughly 6 to 8, so props use the free plan's 500
+requests quickly; the $30 plan (20,000 a month) suits a small book. Props can go in parlays, one
+pick per game like any parlay (no same-game parlays), but not in teasers. A parlay with a prop in it
+waits for the bookie to grade that pick. Without a key, demo props are shown.
 
 **Grading**: every 15 minutes the server pulls final scores for games with open bets and
 grades them. Tennis, props (the feed has no player stats) and anything else the scores feed

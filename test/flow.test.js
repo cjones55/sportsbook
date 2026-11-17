@@ -315,7 +315,7 @@ test('free play', async () => {
   assert.ok(ledger.some(t => t.type === 'bet' && t.wallet === 'freeplay'));
 });
 
-test('props from the feed (demo) are straight bets graded by the bookie', async () => {
+test('props from the feed (demo) are graded by the bookie', async () => {
   const admin = client();
   await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
   const joe = client();
@@ -345,11 +345,13 @@ test('props from the feed (demo) are straight bets graded by the bookie', async 
   assert.equal(gone.status, 409);
   assert.ok(gone.body.changed[0].removed);
 
-  // No props in parlays.
+  // Props can't go in teasers, and a parlay still takes one pick per game.
   const other = nba[1];
-  const parlay = await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [leg, pick(other, 'h2h')] });
-  assert.equal(parlay.status, 400);
-  assert.match(parlay.body.error, /straight bets only/);
+  const teaser = await joe('POST', '/api/bets', { type: 'teaser', teaserPoints: 6, stake: 10, legs: [leg, pick(other, 'spreads')] });
+  assert.equal(teaser.status, 400);
+  const sameGame = await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [leg, pick(ev, 'h2h')] });
+  assert.equal(sameGame.status, 400);
+  assert.match(sameGame.body.error, /one selection per game/);
 
   const placed = await joe('POST', '/api/bets', { type: 'single', stake: 20, legs: [leg] });
   assert.equal(placed.status, 200, JSON.stringify(placed.body));
@@ -427,4 +429,58 @@ test('the bookie can write, grade and undo their own props', async () => {
 
   // A prop with no bets can be deleted.
   assert.equal((await admin('DELETE', `/api/admin/props/${onGame.body.prop.id}`)).status, 200);
+});
+
+test('first TD props, and props in parlays wait for the bookie', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const joe = client();
+  await joe('POST', '/api/login', { username: 'joe', password: 'secret1' });
+  const joeRow = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  bets.applyTransaction(joeRow.id, 50000, 'deposit');
+
+  // First TD scorer for the NFL and college football.
+  const nfl = (await joe('GET', '/api/odds/americanfootball_nfl')).body.events;
+  const ncaaf = (await joe('GET', '/api/odds/americanfootball_ncaaf')).body.events;
+  assert.ok(nfl.length >= 2 && ncaaf.length >= 1);
+  assert.ok(ncaaf[0].hasProps);
+  const firstTd = async ev => (await joe('GET', `/api/props/${ev.sport_key}/${ev.id}`)).body.markets.find(m => m.key === 'player_1st_td');
+  const ftd = await firstTd(nfl[0]);
+  assert.ok(ftd && ftd.title === 'First TD' && ftd.outcomes.length >= 4);
+  assert.ok(ftd.outcomes.every(o => o.name === 'Yes' && o.price >= 500 && o.point === null));
+  assert.ok(await firstTd(ncaaf[0]));
+  const o = ftd.outcomes[0];
+  const tdLeg = { eventId: nfl[0].id, sportKey: nfl[0].sport_key, market: 'player_1st_td', selection: 'Yes', point: null, price: o.price, description: o.description };
+
+  // Parlay: first TD on one game, moneyline on another.
+  const ml = pick(nfl[1], 'h2h');
+  const placed = await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [tdLeg, ml] });
+  assert.equal(placed.status, 200, JSON.stringify(placed.body));
+  const b = placed.body.bet;
+  assert.equal(b.type, 'parlay');
+  assert.equal(b.potential_payout_cents, Math.floor(1000 * bets.americanToDecimal(o.price) * bets.americanToDecimal(ml.price)));
+  const tdRow = b.legs.find(l => l.market === 'player_1st_td');
+  const mlRow = b.legs.find(l => l.market === 'h2h');
+  assert.equal(tdRow.prop_name, 'First TD');
+
+  // Auto-grading settles the game leg as a win; the parlay waits on the prop.
+  db.prepare('UPDATE bet_legs SET commence_time = ? WHERE bet_id = ?').run(new Date(Date.now() - 5 * 3600e3).toISOString(), b.id);
+  bets.settleLeg(mlRow.id, 'won', { by: 'auto' });
+  assert.equal(bets.getBet(b.id).status, 'pending');
+  await bets.autoGrade({ force: true });
+  assert.equal(bets.getBet(b.id).legs.find(l => l.id === tdRow.id).status, 'pending');
+  assert.ok((await admin('GET', '/api/admin/bets?status=props')).body.bets.some(x => x.id === b.id));
+
+  const before = balance(joeRow.id);
+  await admin('POST', `/api/admin/legs/${tdRow.id}/settle`, { status: 'won' });
+  const done = bets.getBet(b.id);
+  assert.equal(done.status, 'won');
+  assert.equal(balance(joeRow.id), before + b.potential_payout_cents);
+  assert.ok(!(await admin('GET', '/api/admin/bets?status=props')).body.bets.some(x => x.id === b.id));
+
+  // A lost game leg loses the parlay without waiting for the prop.
+  const tdLeg2 = { ...tdLeg, description: ftd.outcomes[1].description, price: ftd.outcomes[1].price };
+  const b2 = (await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [tdLeg2, pick(nfl[1], 'h2h')] })).body.bet;
+  bets.settleLeg(b2.legs.find(l => l.market === 'h2h').id, 'lost', { by: 'auto' });
+  assert.equal(bets.getBet(b2.id).status, 'lost');
 });

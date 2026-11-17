@@ -243,7 +243,7 @@
       }
     }
     return `<div class="props"><div class="sports prop-tabs">${tabs.map(([k, t]) => `<button class="chip sm ${k === tab ? 'on' : ''}" data-ptab="${esc(ev.id)}|${esc(k)}">${esc(t)}</button>`).join('')}</div>
-      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo props)' : ''}. Props are straight bets only.</p>` : ''}</div>`;
+      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo props)' : ''}. Props can go in parlays, one pick per game.</p>` : ''}</div>`;
   }
 
   async function toggleProps(ev) {
@@ -324,9 +324,9 @@
     if (!el) return;
     const s = state.slip;
     const hasProps = s.some(isPropLeg);
-    const parlayOk = s.length >= 2 && !hasProps && new Set(s.map(x => x.eventId)).size === s.length;
+    const parlayOk = s.length >= 2 && new Set(s.map(x => x.eventId)).size === s.length;
     const teaserRow = (state.book.teaserOdds || {})[state.teaserPts] || {};
-    const teaserOk = parlayOk && s.every(teaseOk) && !!teaserRow[s.length];
+    const teaserOk = parlayOk && !hasProps && s.every(teaseOk) && !!teaserRow[s.length];
     if (state.slipMode === 'parlay' && !parlayOk) state.slipMode = 'single';
     if (state.slipMode === 'teaser' && !teaserOk) state.slipMode = 'single';
     if (fab) {
@@ -368,7 +368,7 @@
       <div class="row between" style="margin-bottom:10px"><h3 style="margin:0">Bet slip</h3>
         <div class="row" style="gap:6px"><button class="btn sm" id="slipClear">Clear</button><button class="btn sm slip-close" id="slipClose">Hide</button></div></div>
       ${s.length >= 2 ? `<div class="tabs"><button data-slipmode="single" class="${mode === 'single' ? 'on' : ''}">Straight bets</button>
-        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : `disabled title="${hasProps ? 'Props are straight bets only' : 'Only one pick per game in a parlay'}"`}>Parlay</button>
+        <button data-slipmode="parlay" class="${mode === 'parlay' ? 'on' : ''}" ${parlayOk ? '' : `disabled title="Only one pick per game in a parlay"`}>Parlay</button>
         <button data-slipmode="teaser" class="${mode === 'teaser' ? 'on' : ''}" ${teaserOk ? '' : 'disabled title="Teasers are 2 to 6 football or basketball spreads and totals, one per game"'}>Teaser</button></div>` : ''}
       ${mode === 'teaser' ? `<div class="tabs">${['6', '6.5', '7'].map(p => `<button data-teaserpts="${p}" class="${state.teaserPts === p ? 'on' : ''}">${p} pts</button>`).join('')}</div>` : ''}
       ${legsHtml}
@@ -662,7 +662,7 @@
     const tab = state.adminBetsTab || 'open';
     const view = shell(`<div class="row between"><h1>Bets</h1><button class="btn" id="grade">Grade finished games</button></div>
       <div class="tabs" style="max-width:560px"><button data-t="open" class="${tab === 'open' ? 'on' : ''}">Open</button><button data-t="props" class="${tab === 'props' ? 'on' : ''}">Props to grade</button><button data-t="settled" class="${tab === 'settled' ? 'on' : ''}">Settled</button><button data-t="" class="${tab === '' ? 'on' : ''}">All</button></div>
-      <p class="muted small">Games are graded automatically from final scores every 15 minutes when the feed has them. Props are never graded automatically (the feed has no player stats): grade them here with the buttons on each pick, or grade your own props in one go under <a href="#/admin/props">Props</a>. Use the buttons to fix any result; credit is corrected automatically.</p>
+      <p class="muted small">Games are graded automatically from final scores every 15 minutes when the feed has them. Props are never graded automatically (the feed has no player stats), and a parlay with a prop in it waits until you grade that pick: grade them here with the buttons on each pick, or grade your own props in one go under <a href="#/admin/props">Props</a>. Use the buttons to fix any result; credit is corrected automatically.</p>
       <div id="list"><div class="empty">Loading…</div></div>`);
     $$('[data-t]', view).forEach(b => b.onclick = () => { state.adminBetsTab = b.dataset.t; renderAdminBets(); });
     $('#grade', view).onclick = async () => {
@@ -842,9 +842,9 @@
           <label class="field"><span>Stop refreshing when fewer requests than this remain</span><input type="number" min="0" name="odds_quota_floor" value="${esc(s.odds_quota_floor)}"></label>
         </div>
         <label class="field"><span>Sportsbooks to copy lines from, in order of preference</span><input type="text" name="bookmakers" value="${esc(s.bookmakers)}"></label>
-        <label class="check"><input type="checkbox" name="props_enabled" ${s.props_enabled === '1' ? 'checked' : ''}> Offer player and game props from the feed (NFL, NBA, MLB, NHL)</label>
+        <label class="check"><input type="checkbox" name="props_enabled" ${s.props_enabled === '1' ? 'checked' : ''}> Offer player and game props from the feed (NFL, college football, NBA, MLB, NHL)</label>
         <label class="field"><span>Refresh a game's props every (minutes)</span><input type="number" min="1" name="props_ttl_minutes" value="${esc(s.props_ttl_minutes)}"></label>
-        <p class="small muted" style="margin-top:0">Props load only when someone opens a game's props, and each load uses about 6 requests (one per prop market). The free plan's 500 a month runs out quickly; the $30 plan (20,000 a month) is plenty for a small book. Your own props under <a href="#/admin/props">Props</a> use no requests.</p>
+        <p class="small muted" style="margin-top:0">Props load only when someone opens a game's props, and each load uses about 6 to 8 requests (one per prop market). The free plan's 500 a month runs out quickly; the $30 plan (20,000 a month) is plenty for a small book. Your own props under <a href="#/admin/props">Props</a> use no requests.</p>
         <button type="button" class="btn" id="refresh">Refresh odds now</button>
       </div>
       <div class="panel"><h3>Sports on the board</h3>

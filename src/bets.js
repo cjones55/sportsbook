@@ -60,9 +60,10 @@ async function placeBet(user, body) {
     if (legsIn.length < 2) throw new UserError('A parlay needs at least 2 selections.');
     if (legsIn.length > intSetting('max_parlay_legs')) throw new UserError(`Parlays are limited to ${intSetting('max_parlay_legs')} selections.`);
     const ids = new Set(legsIn.map(l => l.eventId));
+    // One pick per game, props included: picks from the same game move together (a QB's yards and his
+    // team winning), so pricing them as independent would overpay.
     if (ids.size !== legsIn.length) throw new UserError('A parlay can only include one selection per game.');
   }
-  if (type !== 'single' && legsIn.some(l => props.isProp(l.market))) throw new UserError('Props are straight bets only. Take them out to make a parlay or teaser.');
   let teaserPts = null, teaserRow = null;
   if (type === 'teaser') {
     teaserPts = Number(body.teaserPoints);
@@ -153,7 +154,7 @@ function listBets({ userId, status, limit = 200, offset = 0 } = {}) {
   if (userId) { where.push('b.user_id = ?'); args.push(userId); }
   if (status === 'open') where.push("b.status = 'pending'");
   else if (status === 'settled') where.push("b.status != 'pending'");
-  else if (status === 'props') where.push("b.status = 'pending' AND EXISTS (SELECT 1 FROM bet_legs pl WHERE pl.bet_id = b.id AND pl.market NOT IN ('h2h','spreads','totals'))");
+  else if (status === 'props') where.push("b.status = 'pending' AND EXISTS (SELECT 1 FROM bet_legs pl WHERE pl.bet_id = b.id AND pl.status = 'pending' AND pl.market NOT IN ('h2h','spreads','totals'))");
   else if (status) { where.push('b.status = ?'); args.push(status); }
   const sql = `SELECT b.*, u.username FROM bets b JOIN users u ON u.id = b.user_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY b.id DESC LIMIT ? OFFSET ?`;
@@ -264,7 +265,8 @@ function gradeLeg(leg, score) {
 // Pull final scores for sports with open bets and grade everything that finished.
 async function autoGrade({ force = false } = {}) {
   if (!force && getSetting('auto_grade') !== '1') return { graded: 0, errors: [] };
-  // Props are left for the bookie: the scores feed has no player stats.
+  // Props are left for the bookie: the scores feed has no player stats. A parlay with a prop leg
+  // stays pending until the bookie grades that leg (unless another leg already lost it).
   const pending = db.prepare(`SELECT * FROM bet_legs WHERE status = 'pending' AND market IN ('h2h','spreads','totals') AND commence_time < ?`)
     .all(new Date(Date.now() - 2 * 3600e3).toISOString());
   if (!pending.length) return { graded: 0, errors: [] };
