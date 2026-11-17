@@ -428,9 +428,15 @@ function serveStatic(req, res, url) {
   const name = url.pathname.replace(/^\/+/, '');
   const file = path.join(PUBLIC, STATIC_FILES.has(name) ? name : 'index.html');
   const ext = path.extname(file);
+  // Browsers check back on every load (a cheap 304 when nothing changed), so an update
+  // reaches clients as soon as it deploys instead of after a stale cached copy expires.
+  const st = fs.statSync(file);
+  const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' }); return res.end(); }
   res.writeHead(200, {
     'Content-Type': MIME[ext] || 'application/octet-stream',
-    'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=300',
+    'Cache-Control': 'no-cache',
+    ETag: etag,
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'same-origin',
     'X-Frame-Options': 'DENY',
