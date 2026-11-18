@@ -7,18 +7,29 @@ const { db, getSetting, intSetting } = require('./db');
 const odds = require('./odds');
 
 const MAIN_MARKETS = ['h2h', 'spreads', 'totals'];
-const isProp = market => !MAIN_MARKETS.includes(market);
+// Alternate lines come from the same per-game feed as props, but grade from the final score
+// like the main spread and total.
+const ALT_MARKETS = ['alternate_spreads', 'alternate_totals'];
+const BASE_MARKET = { alternate_spreads: 'spreads', alternate_totals: 'totals' };
+const baseMarket = market => BASE_MARKET[market] || market;
+const isAlt = market => ALT_MARKETS.includes(market);
+const isProp = market => !MAIN_MARKETS.includes(market) && !isAlt(market);
+// Anything priced from the per-game feed (props and alternate lines) rather than the main board.
+const isFeedMarket = market => !MAIN_MARKETS.includes(market);
 
 // Markets asked for per league. Each market the feed returns costs one request.
 const PROP_MARKETS = {
-  americanfootball_nfl: ['player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td', 'player_1st_td', 'team_totals'],
-  americanfootball_ncaaf: ['player_pass_yds', 'player_rush_yds', 'player_reception_yds', 'player_anytime_td', 'player_1st_td', 'team_totals'],
-  basketball_nba: ['player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_points_rebounds_assists', 'team_totals'],
+  americanfootball_nfl: [...ALT_MARKETS, 'player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td', 'player_1st_td', 'team_totals'],
+  americanfootball_ncaaf: [...ALT_MARKETS, 'player_pass_yds', 'player_rush_yds', 'player_reception_yds', 'player_anytime_td', 'player_1st_td', 'team_totals'],
+  basketball_nba: [...ALT_MARKETS, 'player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_points_rebounds_assists', 'team_totals'],
+  basketball_ncaab: [...ALT_MARKETS],
+  basketball_wncaab: [...ALT_MARKETS],
   baseball_mlb: ['batter_hits', 'batter_home_runs', 'batter_total_bases', 'batter_rbis', 'pitcher_strikeouts', 'team_totals'],
   icehockey_nhl: ['player_points', 'player_goals', 'player_assists', 'player_shots_on_goal', 'player_goal_scorer_anytime', 'team_totals'],
 };
 
 const TITLES = {
+  alternate_spreads: 'Alt Spreads', alternate_totals: 'Alt Totals',
   team_totals: 'Team Total',
   player_pass_yds: 'Passing Yards', player_pass_tds: 'Passing TDs', player_rush_yds: 'Rushing Yards',
   player_reception_yds: 'Receiving Yards', player_receptions: 'Receptions', player_anytime_td: 'Anytime TD',
@@ -138,6 +149,7 @@ function demoMarkets(event) {
     add(key, { name: 'Under', description, price: -110 - lean, point });
   };
   const total = Number(((event.markets.totals || [])[0] || {}).point) || 0;
+  if ((PROP_MARKETS[event.sport_key] || []).includes('alternate_spreads')) demoAltLines(event, add);
   if (total) for (const team of [event.away_team, event.home_team]) ou('team_totals', team, Math.round(total) / 2);
   for (const [pos, key, line, swing] of DEMO[event.sport_key] || []) {
     for (const team of [event.away_team, event.home_team]) {
@@ -148,9 +160,39 @@ function demoMarkets(event) {
       else ou(key, description, swing ? Math.floor(line + (r() - 0.5) * swing) + 0.5 : line);
     }
   }
-  // Keep every line on a half point so there are no pushes in the demo.
-  for (const list of Object.values(byKey)) for (const o of list) if (o.point != null && Number.isInteger(o.point)) o.point += 0.5;
+  // Keep every prop line on a half point so there are no pushes in the demo (alt lines follow the main line).
+  for (const [k, list] of Object.entries(byKey)) if (!isAlt(k)) for (const o of list) if (o.point != null && Number.isInteger(o.point)) o.point += 0.5;
   return (PROP_MARKETS[event.sport_key] || []).filter(k => byKey[k]).map(key => ({ key, title: TITLES[key] || key, outcomes: byKey[key] }));
+}
+
+// Alternate spreads and totals around the main line, priced about 2.5% of win chance per point
+// for football (1.5% for basketball, where points are cheaper), with the usual -110 vig.
+function demoAltLines(event, add) {
+  const football = event.sport_key.startsWith('americanfootball_');
+  const perPoint = football ? 0.025 : 0.015;
+  const steps = football ? [-7, -6, -4, -3, -2, -1, 1, 2, 3, 4, 6, 7] : [-10, -8, -6, -4, -2, 2, 4, 6, 8, 10];
+  const price = prob => {
+    const p = Math.min(0.93, Math.max(0.07, prob)) + 0.024;
+    const a = p >= 0.5 ? -100 * p / (1 - p) : 100 * (1 - p) / p;
+    return Math.round(a / 5) * 5;
+  };
+  const home = (event.markets.spreads || []).find(o => o.name === event.home_team);
+  if (home) {
+    for (const d of steps) {
+      const hp = Number(home.point) + d;
+      if (hp === 0) continue;
+      add('alternate_spreads', { name: event.away_team, description: null, price: price(0.5 - perPoint * d), point: -hp });
+      add('alternate_spreads', { name: event.home_team, description: null, price: price(0.5 + perPoint * d), point: hp });
+    }
+  }
+  const over = (event.markets.totals || []).find(o => o.name === 'Over');
+  if (over) {
+    for (const d of steps) {
+      const t = Number(over.point) + d * (football ? 1 : 2);
+      add('alternate_totals', { name: 'Over', description: null, price: price(0.5 - perPoint * d), point: t });
+      add('alternate_totals', { name: 'Under', description: null, price: price(0.5 + perPoint * d), point: t });
+    }
+  }
 }
 
 // ---------- the bookie's own props ----------
@@ -218,7 +260,7 @@ async function resolveLeg(l) {
     && (o.point == null ? l.point == null : Number(o.point) === Number(l.point)));
   if (!out) return { removed: true };
   if (Number(out.price) !== Number(l.price)) return { changed: { price: out.price, point: out.point } };
-  return { leg: { event, market: l.market, selection: out.name, point: out.point, price: out.price, description: out.description, propName: mk.title, propId: null } };
+  return { leg: { event, market: l.market, selection: out.name, point: out.point, price: out.price, description: isAlt(l.market) ? null : out.description, propName: mk.title, propId: null } };
 }
 
-module.exports = { isProp, PROP_MARKETS, feedPropsOn, forEvent, openCustom, eventsWithCustom, hasSpecials, customView, resolveLeg, _demoMarkets: demoMarkets };
+module.exports = { isProp, isAlt, isFeedMarket, baseMarket, ALT_MARKETS, PROP_MARKETS, feedPropsOn, forEvent, openCustom, eventsWithCustom, hasSpecials, customView, resolveLeg, _demoMarkets: demoMarkets };

@@ -22,7 +22,8 @@
     return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
   };
   const sqlTime = s => (s ? when(s.replace(' ', 'T') + 'Z') : '');
-  const MARKET = { h2h: 'Moneyline', spreads: 'Spread', totals: 'Total' };
+  const MARKET = { h2h: 'Moneyline', spreads: 'Spread', totals: 'Total', alternate_spreads: 'Alt Spread', alternate_totals: 'Alt Total' };
+  const baseMarket = m => ({ alternate_spreads: 'spreads', alternate_totals: 'totals' })[m] || m;
 
   const TEASER_SPORTS = ['americanfootball_', 'basketball_'];
   const teaseOk = l => ['spreads', 'totals'].includes(l.market) && TEASER_SPORTS.some(p => String(l.sportKey || l.sport_key).startsWith(p));
@@ -35,8 +36,8 @@
 
   function legLabel(l) {
     if (isPropLeg(l)) return [l.description, l.propName ?? l.prop_name, l.selection, l.point].filter(x => x != null && x !== '').join(' ');
-    if (l.market === 'totals') return `${l.selection} ${l.point}`;
-    if (l.market === 'spreads') return `${l.selection} ${pt(l.point)}`;
+    if (baseMarket(l.market) === 'totals') return `${l.selection} ${l.point}`;
+    if (baseMarket(l.market) === 'spreads') return `${l.selection} ${pt(l.point)}`;
     return `${l.selection} ML`;
   }
 
@@ -204,8 +205,9 @@
   // Same rules as the server's parlayConflict (src/bets.js).
   function parlayConflict(legs, sameGame) {
     if (!sameGame) return new Set(legs.map(l => l.eventId)).size === legs.length ? null : 'only one pick per game.';
-    const has = (ev, m) => legs.some(l => l.eventId === ev && l.market === m);
-    if (new Set(legs.map(groupOf)).size !== legs.length) return 'only one side of each bet.';
+    const has = (ev, m) => legs.some(l => l.eventId === ev && baseMarket(l.market) === m);
+    // An alternate spread or total counts as the same bet as the main one.
+    if (new Set(legs.map(l => groupOf({ ...l, market: baseMarket(l.market) }))).size !== legs.length) return 'only one side of each bet.';
     if (legs.some(l => l.market === 'player_1st_td' && legs.filter(x => x.eventId === l.eventId && x.market === 'player_1st_td').length > 1)) return 'only one first touchdown scorer per game.';
     if (legs.some(l => has(l.eventId, 'h2h') && has(l.eventId, 'spreads'))) return "a moneyline and a spread from the same game can't be combined.";
     return null;
@@ -235,24 +237,34 @@
 
   function propsPanel(ev) {
     const d = state.props[ev.id];
-    if (!d) return '<div class="props"><div class="muted small">Loading props…</div></div>';
+    if (!d) return '<div class="props"><div class="muted small">Loading…</div></div>';
     if (d.error) return `<div class="props"><div class="muted small">${esc(d.error)}</div></div>`;
     const tabs = [...(d.custom.length ? [['custom', 'Specials']] : []), ...d.markets.map(m => [m.key, m.title])];
-    if (!tabs.length) return '<div class="props"><div class="muted small">No props for this game right now.</div></div>';
+    if (!tabs.length) return '<div class="props"><div class="muted small">No extra bets for this game right now.</div></div>';
     const tab = tabs.some(t => t[0] === state.propTab[ev.id]) ? state.propTab[ev.id] : tabs[0][0];
     let body = '';
     if (tab === 'custom') body = d.custom.map(c => customBlock(c, evInfo(ev))).join('');
     else {
       const m = d.markets.find(x => x.key === tab);
+      const nick = t => String(t).split(' ').slice(-1)[0];
       const rows = new Map();
-      for (const o of m.outcomes) { const k = o.description || ''; if (!rows.has(k)) rows.set(k, []); rows.get(k).push(o); }
-      for (const [desc, outs] of rows) {
-        body += `<div class="prop-row"><div class="team">${esc(desc || m.title)}</div><div class="prop-odds">${outs.map(o =>
-          cell({ ...evInfo(ev), market: m.key, description: o.description, propName: m.title, selection: o.name, point: o.point, price: o.price }, ouShort(o))).join('')}</div></div>`;
+      // Alt spreads: one row per line, away team then home. Alt totals: one row per total, Over then Under.
+      const rowOf = o => m.key === 'alternate_spreads' ? String(o.name === ev.home_team ? o.point : -o.point)
+        : m.key === 'alternate_totals' ? String(o.point) : o.description || '';
+      for (const o of m.outcomes) { const k = rowOf(o); if (!rows.has(k)) rows.set(k, []); rows.get(k).push(o); }
+      const order = m.key === 'alternate_spreads' ? o => (o.name === ev.away_team ? 0 : 1) : o => (o.name === 'Under' ? 1 : 0);
+      const keys = baseMarket(m.key) !== m.key ? [...rows.keys()].sort((a, b) => Number(a) - Number(b)) : [...rows.keys()];
+      for (const k of keys) {
+        const outs = baseMarket(m.key) !== m.key ? [...rows.get(k)].sort((a, b) => order(a) - order(b)) : rows.get(k);
+        const label = m.key === 'alternate_spreads' ? `${nick(ev.away_team)} ${pt(-Number(k))} / ${nick(ev.home_team)} ${pt(Number(k))}`
+          : m.key === 'alternate_totals' ? `Total ${k}` : k || m.title;
+        const top = o => m.key === 'alternate_spreads' ? `${nick(o.name)} ${pt(o.point)}` : ouShort(o);
+        body += `<div class="prop-row"><div class="team">${esc(label)}</div><div class="prop-odds">${outs.map(o =>
+          cell({ ...evInfo(ev), market: m.key, description: m.key.startsWith('alternate_') ? null : o.description, propName: m.title, selection: o.name, point: o.point, price: o.price }, top(o))).join('')}</div></div>`;
       }
     }
     return `<div class="props"><div class="sports prop-tabs">${tabs.map(([k, t]) => `<button class="chip sm ${k === tab ? 'on' : ''}" data-ptab="${esc(ev.id)}|${esc(k)}">${esc(t)}</button>`).join('')}</div>
-      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo props)' : ''}. Props can go in parlays${state.book.sameGameParlays ? ', including with other picks from this game' : ', one pick per game'}.</p>` : ''}</div>`;
+      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo odds)' : ''}. Props and alt lines can go in parlays${state.book.sameGameParlays ? ', including with other picks from this game' : ', one pick per game'}.</p>` : ''}</div>`;
   }
 
   async function toggleProps(ev) {
@@ -292,7 +304,7 @@
       const m = ev.markets;
       const find = (mk, name) => (m[mk] || []).find(o => o.name === name);
       html += `<div class="game">
-        <div class="game-head"><span>${esc(timeOnly(ev.commence_time))}</span><span>${esc(ev.bookmaker || '')}${ev.hasProps ? ` <button class="linkbtn" data-props="${esc(ev.id)}">${state.propsOpen.has(ev.id) ? 'Hide props' : 'Props'}</button>` : ''}</span></div>
+        <div class="game-head"><span>${esc(timeOnly(ev.commence_time))}</span><span>${esc(ev.bookmaker || '')}${ev.hasProps ? ` <button class="linkbtn" data-props="${esc(ev.id)}">${state.propsOpen.has(ev.id) ? 'Hide' : 'More bets'}</button>` : ''}</span></div>
         <div class="lines">
           <div></div><div class="hdr">Spread</div><div class="hdr">Money</div><div class="hdr">Total</div>
           <div class="team">${esc(ev.away_team)}</div>
@@ -855,9 +867,9 @@
           <label class="field"><span>Stop refreshing when fewer requests than this remain</span><input type="number" min="0" name="odds_quota_floor" value="${esc(s.odds_quota_floor)}"></label>
         </div>
         <label class="field"><span>Sportsbooks to copy lines from, in order of preference</span><input type="text" name="bookmakers" value="${esc(s.bookmakers)}"></label>
-        <label class="check"><input type="checkbox" name="props_enabled" ${s.props_enabled === '1' ? 'checked' : ''}> Offer player and game props from the feed (NFL, college football, NBA, MLB, NHL)</label>
+        <label class="check"><input type="checkbox" name="props_enabled" ${s.props_enabled === '1' ? 'checked' : ''}> Offer player props and alternate lines from the feed (props: NFL, college football, NBA, MLB, NHL; alt spreads and totals: NFL, college football, NBA, college basketball)</label>
         <label class="field"><span>Refresh a game's props every (minutes)</span><input type="number" min="1" name="props_ttl_minutes" value="${esc(s.props_ttl_minutes)}"></label>
-        <p class="small muted" style="margin-top:0">Props load only when someone opens a game's props, and each load uses about 6 to 8 requests (one per prop market). The free plan's 500 a month runs out quickly; the $30 plan (20,000 a month) is plenty for a small book. Your own props under <a href="#/admin/props">Props</a> use no requests.</p>
+        <p class="small muted" style="margin-top:0">Props load only when someone opens a game's props, and each load uses about 2 to 10 requests (one per prop market). The free plan's 500 a month runs out quickly; the $30 plan (20,000 a month) is plenty for a small book. Your own props under <a href="#/admin/props">Props</a> use no requests.</p>
         <button type="button" class="btn" id="refresh">Refresh odds now</button>
       </div>
       <div class="panel"><h3>Sports on the board</h3>

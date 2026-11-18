@@ -519,3 +519,54 @@ test('same-game parlays: props and lines from one game, but not both sides', asy
   const teaser = await joe('POST', '/api/bets', { type: 'teaser', teaserPoints: 6, stake: 5, legs: [pick(ev, 'spreads'), pick(ev, 'totals')] });
   assert.equal(teaser.status, 400);
 });
+
+test('alternate spreads and totals: priced per game, auto-graded, parlay rules', async () => {
+  const joe = client();
+  await joe('POST', '/api/login', { username: 'joe', password: 'secret1' });
+  const joeRow = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  bets.applyTransaction(joeRow.id, 50000, 'deposit');
+  const nba = (await joe('GET', '/api/odds/basketball_nba')).body.events;
+  const ncaab = (await joe('GET', '/api/odds/basketball_ncaab')).body.events;
+  assert.ok(ncaab[0].hasProps);
+  const altOf = async ev => (await joe('GET', `/api/props/${ev.sport_key}/${ev.id}`)).body.markets;
+  assert.ok((await altOf(ncaab[0])).some(m => m.key === 'alternate_spreads'));
+  const ev = nba[3];
+  const mk = await altOf(ev);
+  const as = mk.find(m => m.key === 'alternate_spreads');
+  const at = mk.find(m => m.key === 'alternate_totals');
+  assert.ok(as.outcomes.length >= 10 && at.outcomes.length >= 10);
+  // Taking more points costs more.
+  const home = as.outcomes.filter(o => o.name === ev.home_team).sort((a, b) => a.point - b.point);
+  assert.ok(bets.americanToDecimal(home[0].price) > bets.americanToDecimal(home[home.length - 1].price));
+  const legOf = (key, o) => ({ eventId: ev.id, sportKey: ev.sport_key, market: key, selection: o.name, point: o.point, price: o.price, description: null });
+  const spreadLeg = legOf('alternate_spreads', home[0]);
+  const over = at.outcomes.find(o => o.name === 'Over');
+  const totalLeg = legOf('alternate_totals', over);
+
+  // Not with the main spread, a moneyline, or in a teaser.
+  assert.match((await joe('POST', '/api/bets', { type: 'parlay', stake: 5, legs: [spreadLeg, pick(ev, 'spreads')] })).body.error, /one side/);
+  assert.match((await joe('POST', '/api/bets', { type: 'parlay', stake: 5, legs: [spreadLeg, pick(ev, 'h2h')] })).body.error, /moneyline and a spread/);
+  assert.equal((await joe('POST', '/api/bets', { type: 'teaser', teaserPoints: 6, stake: 5, legs: [spreadLeg, pick(nba[4], 'spreads')] })).status, 400);
+
+  const placed = await joe('POST', '/api/bets', { type: 'parlay', stake: 10, legs: [spreadLeg, totalLeg] });
+  assert.equal(placed.status, 200, JSON.stringify(placed.body));
+  const b = placed.body.bet;
+  assert.equal(b.legs[0].prop_name, 'Alt Spreads');
+  // Alt lines aren't props: nothing for the bookie to grade by hand.
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  assert.ok(!(await admin('GET', '/api/admin/bets?status=props')).body.bets.some(x => x.id === b.id));
+
+  // Graded from the final score.
+  const leg = b.legs.find(l => l.market === 'alternate_spreads');
+  const tl = b.legs.find(l => l.market === 'alternate_totals');
+  const score = { home_team: ev.home_team, away_team: ev.away_team, home_score: 110, away_score: 100 };
+  assert.equal(bets.gradeLeg({ ...leg, point: -9.5 }, score).status, 'won');
+  assert.equal(bets.gradeLeg({ ...leg, point: -10.5 }, score).status, 'lost');
+  assert.equal(bets.gradeLeg({ ...tl, selection: 'Over', point: 205.5 }, score).status, 'won');
+  db.prepare('UPDATE bet_legs SET commence_time = ? WHERE bet_id = ?').run(new Date(Date.now() - 5 * 3600e3).toISOString(), b.id);
+  await bets.autoGrade({ force: true });
+  const after = bets.getBet(b.id);
+  assert.ok(after.legs.every(l => l.status !== 'pending'), JSON.stringify(after.legs.map(l => l.status)));
+  assert.notEqual(after.status, 'pending');
+});

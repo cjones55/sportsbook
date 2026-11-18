@@ -38,10 +38,11 @@ Bets are checked against the current line when placed; if the price moved, the c
 shown the new price. Games that already started can't be bet.
 
 **Props**: player and game props for NFL, college football, NBA, MLB and NHL come from the same feed
-(football includes anytime and first touchdown scorer), fetched
+(football includes anytime and first touchdown scorer), plus alternate spreads and totals for NFL,
+college football, NBA and college basketball, fetched
 one game at a time only when someone opens that game's props (cached 60 minutes by default).
 Each load costs about one request per prop market, roughly 6 to 8, so props use the free plan's 500
-requests quickly; the $30 plan (20,000 a month) suits a small book. Props can go in parlays, including
+requests quickly; the $30 plan (20,000 a month) suits a small book. Alternate lines are graded automatically from final scores like the main lines. Props and alt lines can go in parlays, including
 same-game parlays (several picks from one game; switch off in Settings), but not in teasers. A parlay with a prop in it
 waits for the bookie to grade that pick. Without a key, demo props are shown.
 
