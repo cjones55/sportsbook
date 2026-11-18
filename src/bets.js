@@ -55,11 +55,12 @@ function parlayConflict(legs, sameGame) {
   if (!sameGame) return new Set(legs.map(l => l.eventId)).size === legs.length ? null : 'A parlay can only include one selection per game.';
   const groups = new Set();
   for (const l of legs) {
-    const g = `${l.eventId}|${l.market}|${props.isProp(l.market) ? (l.propId ?? l.description ?? '') : ''}`;
+    // An alternate spread or total counts as the same bet as the main one.
+    const g = `${l.eventId}|${props.baseMarket(l.market)}|${props.isProp(l.market) ? (l.propId ?? l.description ?? '') : ''}`;
     if (groups.has(g)) return 'A parlay can only include one side of each bet.';
     groups.add(g);
   }
-  const has = (ev, m) => legs.some(l => l.eventId === ev && l.market === m);
+  const has = (ev, m) => legs.some(l => l.eventId === ev && props.baseMarket(l.market) === m);
   if (legs.some(l => l.market === 'player_1st_td' && legs.filter(x => x.eventId === l.eventId && x.market === 'player_1st_td').length > 1)) return 'A parlay can only include one first touchdown scorer per game.';
   if (legs.some(l => has(l.eventId, 'h2h') && has(l.eventId, 'spreads'))) return "A parlay can't combine a moneyline and a spread from the same game.";
   return null;
@@ -104,7 +105,7 @@ async function placeBet(user, body) {
   const changed = [];
   const bySport = {};
   for (const l of legsIn) {
-    if (props.isProp(l.market)) {
+    if (props.isFeedMarket(l.market)) {
       const r = await props.resolveLeg(l);
       if (r.gone) throw new UserError(r.gone, 409);
       if (r.removed) { changed.push({ ...l, removed: true }); continue; }
@@ -169,7 +170,7 @@ function listBets({ userId, status, limit = 200, offset = 0 } = {}) {
   if (userId) { where.push('b.user_id = ?'); args.push(userId); }
   if (status === 'open') where.push("b.status = 'pending'");
   else if (status === 'settled') where.push("b.status != 'pending'");
-  else if (status === 'props') where.push("b.status = 'pending' AND EXISTS (SELECT 1 FROM bet_legs pl WHERE pl.bet_id = b.id AND pl.status = 'pending' AND pl.market NOT IN ('h2h','spreads','totals'))");
+  else if (status === 'props') where.push("b.status = 'pending' AND EXISTS (SELECT 1 FROM bet_legs pl WHERE pl.bet_id = b.id AND pl.status = 'pending' AND pl.market NOT IN ('h2h','spreads','totals','alternate_spreads','alternate_totals'))");
   else if (status) { where.push('b.status = ?'); args.push(status); }
   const sql = `SELECT b.*, u.username FROM bets b JOIN users u ON u.id = b.user_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY b.id DESC LIMIT ? OFFSET ?`;
@@ -265,14 +266,15 @@ function gradeLeg(leg, score) {
   const mine = leg.selection === score.home_team ? score.home_score : leg.selection === score.away_team ? score.away_score : null;
   const theirs = leg.selection === score.home_team ? score.away_score : score.home_score;
   const note = `Final: ${score.away_team} ${score.away_score}, ${score.home_team} ${score.home_score}`;
-  if (leg.market === 'totals') {
+  const market = props.baseMarket(leg.market);
+  if (market === 'totals') {
     const total = score.home_score + score.away_score;
     if (total === leg.point) return { status: 'push', note };
     const over = total > leg.point;
     return { status: (leg.selection === 'Over') === over ? 'won' : 'lost', note };
   }
   if (mine === null) return null;
-  const adj = mine + (leg.market === 'spreads' ? Number(leg.point) : 0);
+  const adj = mine + (market === 'spreads' ? Number(leg.point) : 0);
   if (adj === theirs) return { status: 'push', note };
   return { status: adj > theirs ? 'won' : 'lost', note };
 }
@@ -282,7 +284,7 @@ async function autoGrade({ force = false } = {}) {
   if (!force && getSetting('auto_grade') !== '1') return { graded: 0, errors: [] };
   // Props are left for the bookie: the scores feed has no player stats. A parlay with a prop leg
   // stays pending until the bookie grades that leg (unless another leg already lost it).
-  const pending = db.prepare(`SELECT * FROM bet_legs WHERE status = 'pending' AND market IN ('h2h','spreads','totals') AND commence_time < ?`)
+  const pending = db.prepare(`SELECT * FROM bet_legs WHERE status = 'pending' AND market IN ('h2h','spreads','totals','alternate_spreads','alternate_totals') AND commence_time < ?`)
     .all(new Date(Date.now() - 2 * 3600e3).toISOString());
   if (!pending.length) return { graded: 0, errors: [] };
   const errors = [];
