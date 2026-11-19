@@ -452,6 +452,14 @@ test('first TD props, and props in parlays wait for the bookie', async () => {
   assert.ok(ftd && ftd.title === 'First TD' && ftd.outcomes.length >= 4);
   assert.ok(ftd.outcomes.every(o => o.name === 'Yes' && o.price >= 500 && o.point === null));
   assert.ok(await firstTd(ncaaf[0]));
+  // 2+ TDs: the touchdowns market at 1.5, Over only.
+  const two = (await joe('GET', `/api/props/${nfl[0].sport_key}/${nfl[0].id}`)).body.markets.find(m => m.key === 'player_tds_over');
+  assert.ok(two && two.title === '2+ TDs' && two.outcomes.length >= 4);
+  assert.ok(two.outcomes.every(o => o.name === 'Over' && o.point === 1.5 && o.price >= 300));
+  const t2 = two.outcomes[0];
+  const twoBet = await joe('POST', '/api/bets', { type: 'single', stake: 5, legs: [{ eventId: nfl[0].id, sportKey: nfl[0].sport_key, market: 'player_tds_over', selection: 'Over', point: 1.5, price: t2.price, description: t2.description }] });
+  assert.equal(twoBet.status, 200, JSON.stringify(twoBet.body));
+  assert.equal(twoBet.body.bet.legs[0].prop_name, '2+ TDs');
   const o = ftd.outcomes[0];
   const tdLeg = { eventId: nfl[0].id, sportKey: nfl[0].sport_key, market: 'player_1st_td', selection: 'Yes', point: null, price: o.price, description: o.description };
 

@@ -32,9 +32,10 @@
 
   const isPropLeg = l => !MARKET[l.market];
   const evName = (away, home, title) => (away && home ? `${away} @ ${home}` : title || 'Special');
-  const ouShort = o => (o.name === 'Over' ? 'O' : o.name === 'Under' ? 'U' : o.name) + (o.point != null ? ' ' + o.point : '');
+  const ouShort = o => o.market === 'player_tds_over' ? `${Math.ceil(Number(o.point))}+ TDs` : (o.name === 'Over' ? 'O' : o.name === 'Under' ? 'U' : o.name) + (o.point != null ? ' ' + o.point : '');
 
   function legLabel(l) {
+    if (l.market === 'player_tds_over') return `${l.description} ${Math.ceil(Number(l.point))}+ TDs`;
     if (isPropLeg(l)) return [l.description, l.propName ?? l.prop_name, l.selection, l.point].filter(x => x != null && x !== '').join(' ');
     if (baseMarket(l.market) === 'totals') return `${l.selection} ${l.point}`;
     if (baseMarket(l.market) === 'spreads') return `${l.selection} ${pt(l.point)}`;
@@ -258,13 +259,13 @@
         const outs = baseMarket(m.key) !== m.key ? [...rows.get(k)].sort((a, b) => order(a) - order(b)) : rows.get(k);
         const label = m.key === 'alternate_spreads' ? `${nick(ev.away_team)} ${pt(-Number(k))} / ${nick(ev.home_team)} ${pt(Number(k))}`
           : m.key === 'alternate_totals' ? `Total ${k}` : k || m.title;
-        const top = o => m.key === 'alternate_spreads' ? `${nick(o.name)} ${pt(o.point)}` : ouShort(o);
+        const top = o => m.key === 'alternate_spreads' ? `${nick(o.name)} ${pt(o.point)}` : ouShort({ ...o, market: m.key });
         body += `<div class="prop-row"><div class="team">${esc(label)}</div><div class="prop-odds">${outs.map(o =>
           cell({ ...evInfo(ev), market: m.key, description: m.key.startsWith('alternate_') ? null : o.description, propName: m.title, selection: o.name, point: o.point, price: o.price }, top(o))).join('')}</div></div>`;
       }
     }
     return `<div class="props"><div class="sports prop-tabs">${tabs.map(([k, t]) => `<button class="chip sm ${k === tab ? 'on' : ''}" data-ptab="${esc(ev.id)}|${esc(k)}">${esc(t)}</button>`).join('')}</div>
-      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}${d.source === 'demo' ? ' (demo odds)' : ''}. Props and alt lines can go in parlays${state.book.sameGameParlays ? ', including with other picks from this game' : ', one pick per game'}.</p>` : ''}</div>`;
+      ${body}${d.source ? `<p class="muted small" style="margin:6px 0 0">${esc(d.bookmaker || '')}. Props and alt lines can go in parlays${state.book.sameGameParlays ? ', including with other picks from this game' : ', one pick per game'}.</p>` : ''}</div>`;
   }
 
   async function toggleProps(ev) {
