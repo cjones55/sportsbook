@@ -578,3 +578,103 @@ test('alternate spreads and totals: priced per game, auto-graded, parlay rules',
   assert.ok(after.legs.every(l => l.status !== 'pending'), JSON.stringify(after.legs.map(l => l.status)));
   assert.notEqual(after.status, 'pending');
 });
+
+test('blackjack: hands are dealt, played and paid from credit, and the bookie sees them', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const { body: { user } } = await admin('POST', '/api/admin/users', { username: 'bjplayer', password: 'secret1', credit: '1000' });
+  const p = client();
+  await p('POST', '/api/login', { username: 'bjplayer', password: 'secret1' });
+  const bal = () => db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(user.id).balance_cents;
+
+  assert.equal((await admin('POST', '/api/blackjack/deal', { bet: 10 })).status, 403);
+  assert.equal((await p('POST', '/api/blackjack/deal', { bet: 0.5 })).status, 400);
+  assert.equal((await p('POST', '/api/blackjack/deal', { bet: 500 })).status, 400);
+  assert.equal((await p('POST', '/api/blackjack/action', { action: 'hit' })).status, 409);
+
+  // Rig a hand: set the shoe so we know what comes next (cards are popped from the end).
+  const rig = async (player, dealer, shoe) => {
+    const r = await p('POST', '/api/blackjack/deal', { bet: 10 });
+    assert.equal(r.status, 200);
+    const row = db.prepare("SELECT * FROM blackjack_hands WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(user.id);
+    if (row.status !== 'playing') return rig(player, dealer, shoe); // natural blackjack: deal again
+    db.prepare('UPDATE blackjack_hands SET state = ? WHERE id = ?').run(JSON.stringify({ shoe: [...shoe].reverse(), dealer, hands: [{ cards: player, bet: 1000 }], active: 0, done: false }), row.id);
+    return row.id;
+  };
+
+  // The hole card is hidden while playing.
+  await rig(['10S', '6H'], ['9C', '8D'], ['2C']);
+  let r = (await p('GET', '/api/blackjack')).body;
+  assert.deepEqual(r.hand.dealer.cards, ['9C', null]);
+  assert.ok(r.hand.actions.includes('double') && !r.hand.actions.includes('split'));
+  // Hit to 18, stand; dealer 17 stands: win pays even money.
+  let before = bal();
+  r = (await p('POST', '/api/blackjack/action', { action: 'hit' })).body;
+  assert.equal(r.hand.hands[0].total, 18);
+  r = (await p('POST', '/api/blackjack/action', { action: 'stand' })).body;
+  assert.equal(r.hand.result, 'win');
+  assert.equal(r.hand.payoutCents, 2000);
+  assert.equal(bal(), before + 2000);
+
+  // Double down: second bet taken, one card, dealer busts.
+  await rig(['5S', '6H'], ['6C', '10D'], ['10C', '9H']);
+  before = bal();
+  r = (await p('POST', '/api/blackjack/action', { action: 'double' })).body;
+  assert.equal(r.hand.status, 'done');
+  assert.equal(r.hand.hands[0].total, 21);
+  assert.equal(r.hand.totalBetCents, 2000);
+  assert.equal(r.hand.result, 'win');
+  assert.equal(bal(), before - 1000 + 4000);
+
+  // Split eights: two hands, one wins and one loses, net zero.
+  await rig(['8S', '8H'], ['10C', '8D'], ['10H', '2C', 'KD']);
+  before = bal();
+  r = (await p('POST', '/api/blackjack/action', { action: 'split' })).body;
+  assert.equal(r.hand.hands.length, 2);
+  assert.equal(r.hand.hands[0].total, 18);
+  r = (await p('POST', '/api/blackjack/action', { action: 'stand' })).body;
+  assert.equal(r.hand.hands[1].total, 10);
+  r = (await p('POST', '/api/blackjack/action', { action: 'hit' })).body;
+  assert.equal(r.hand.hands[1].total, 20);
+  r = (await p('POST', '/api/blackjack/action', { action: 'stand' })).body;
+  assert.equal(r.hand.status, 'done');
+  assert.deepEqual(r.hand.hands.map(h => h.result), ['push', 'win']);
+  assert.equal(bal(), before - 1000 + 1000 + 2000);
+
+  // Bust loses without the dealer drawing.
+  await rig(['10S', '6H'], ['9C', '7D'], ['KC']);
+  r = (await p('POST', '/api/blackjack/action', { action: 'hit' })).body;
+  assert.equal(r.hand.result, 'bust');
+  assert.equal(r.hand.dealer.cards.length, 2);
+
+  // Only one hand at a time; an abandoned hand can be voided by the bookie for a refund.
+  const open = await rig(['10S', '6H'], ['9C', '7D'], ['KC']);
+  assert.equal((await p('POST', '/api/blackjack/deal', { bet: 10 })).status, 409);
+  before = bal();
+  assert.equal((await admin('POST', `/api/admin/blackjack/${open}/void`)).status, 200);
+  assert.equal(bal(), before + 1000);
+
+  // Random hands keep the books straight: credit moves by exactly payout minus stakes.
+  for (let i = 0; i < 40; i++) {
+    before = bal();
+    let h = (await p('POST', '/api/blackjack/deal', { bet: 10 })).body.hand;
+    while (h.status === 'playing') h = (await p('POST', '/api/blackjack/action', { action: h.hands.find(x => x.active).total < 17 ? 'hit' : 'stand' })).body.hand;
+    assert.equal(bal(), before - h.totalBetCents + h.payoutCents);
+  }
+
+  // The bookie sees every hand, with stats, on the dashboard and the client's page.
+  const a = (await admin('GET', '/api/admin/blackjack')).body;
+  assert.ok(a.hands.length >= 45 && a.hands.every(h => h.username === 'bjplayer'));
+  const done = db.prepare("SELECT COALESCE(SUM(total_bet_cents - payout_cents),0) n FROM blackjack_hands WHERE status = 'done'").get().n;
+  assert.equal(a.stats.profitCents, done);
+  assert.equal((await admin('GET', '/api/admin/summary')).body.blackjack.profitCents, done);
+  assert.ok((await admin('GET', `/api/admin/users/${user.id}`)).body.blackjack.length > 0);
+  const row = (await admin('GET', '/api/admin/users')).body.users.find(u => u.id === user.id);
+  assert.equal(row.bookProfitCents, done);
+  assert.equal(bal(), 100000 - done);
+
+  // Turning it off closes the table.
+  await admin('PATCH', '/api/admin/settings', { blackjack_enabled: '0' });
+  assert.equal((await p('POST', '/api/blackjack/deal', { bet: 10 })).status, 400);
+  await admin('PATCH', '/api/admin/settings', { blackjack_enabled: '1' });
+});

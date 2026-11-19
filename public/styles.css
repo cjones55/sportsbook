@@ -182,3 +182,26 @@ td.r, th.r { text-align: right; }
   .team { white-space: normal; font-size: .9rem; line-height: 1.2; }
   .lines { grid-template-columns: minmax(0, 1fr) repeat(3, 64px); }
 }
+
+/* blackjack */
+.bj-table { background: radial-gradient(ellipse at center top, #14523a, #0b3324 70%); border: 1px solid #1f6b4c; border-radius: 16px; padding: 22px 14px; margin-bottom: 16px; display: flex; flex-direction: column; align-items: center; gap: 16px; min-height: 340px; }
+.bj-side { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; border: 2px solid transparent; }
+.bj-side.split.active { border-color: var(--warn); }
+.bj-hands { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+.bj-label { color: #cfe9dc; font-size: .9rem; }
+.bj-label b { color: #fff; font-size: 1.05rem; }
+.bj-cards { display: flex; min-height: 92px; }
+.bj-cards .card + .card { margin-left: -22px; }
+.card { width: 64px; height: 92px; border-radius: 8px; background: #fbfbf8; color: #15171a; display: inline-flex; flex-direction: column; justify-content: space-between; padding: 5px 7px; box-shadow: 0 2px 6px rgba(0,0,0,.45); font-family: Georgia, serif; }
+.card b { font-size: 1.25rem; line-height: 1; }
+.card i { font-style: normal; font-size: 1.6rem; align-self: flex-end; line-height: 1; }
+.card.red { color: #c8202f; }
+.card.back { background: repeating-linear-gradient(45deg, #1b3f8a, #1b3f8a 6px, #2a56b3 6px, #2a56b3 12px); border: 3px solid #fbfbf8; }
+.card.ghost { background: transparent; border: 2px dashed rgba(255,255,255,.18); box-shadow: none; }
+.bj-msg { font-weight: 800; font-size: 1.15rem; text-align: center; min-height: 1.4em; }
+.bj-msg.pos { color: #6ff0a8; }
+.bj-msg.neg { color: #ff9a9a; }
+.bj-controls .btn { min-width: 84px; }
+.bj-controls .chipbtn { min-width: 0; border-radius: 99px; }
+@media (max-width: 520px) { .card { width: 52px; height: 76px; } .card b { font-size: 1.05rem; } .card i { font-size: 1.3rem; } .bj-cards { min-height: 76px; } .bj-controls .btn { min-width: 70px; } }
+.bj-msg.small { font-size: .8rem; font-weight: 500; }
