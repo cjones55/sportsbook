@@ -310,6 +310,37 @@ async function autoGrade({ force = false } = {}) {
 
 // ---------- reporting ----------
 
+// Clients settle up weekly, Monday to Sunday, in the book's time zone
+// (BOOK_TIMEZONE, default US Eastern). Returns that Monday 00:00 as a Date.
+const BOOK_TZ = process.env.BOOK_TIMEZONE || 'America/New_York';
+function weekStart(now = new Date(), tz = BOOK_TZ) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short', hour: 'numeric', minute: 'numeric', second: 'numeric',
+  }).formatToParts(now).map(p => [p.type, p.value]));
+  const dow = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(parts.weekday);
+  // Midnight on Monday as if the zone were UTC, then shift by the zone's offset at that moment.
+  const guess = Date.UTC(+parts.year, +parts.month - 1, +parts.day - dow);
+  const offsetAt = t => {
+    const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })
+      .formatToParts(new Date(t)).map(x => [x.type, x.value]));
+    return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - t;
+  };
+  let t = guess - offsetAt(guess);
+  t = guess - offsetAt(t);
+  return new Date(t);
+}
+
+// A client's net result on bets settled since the week started: winnings
+// minus stakes lost. Free play stakes are not the client's money, so a free
+// play bet only counts what it paid out.
+function weeklyNet(userId, now = new Date()) {
+  const start = weekStart(now);
+  const sqlStart = start.toISOString().replace('T', ' ').slice(0, 19);
+  const r = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(payout_cents - CASE WHEN freeplay = 1 THEN 0 ELSE stake_cents END), 0) net
+    FROM bets WHERE user_id = ? AND status != 'pending' AND settled_at >= ?`).get(userId, sqlStart);
+  return { netCents: r.net, settledBets: r.n, weekStart: start.toISOString(), timeZone: BOOK_TZ };
+}
+
 function summary() {
   const q = (sql, ...a) => db.prepare(sql).get(...a);
   const clients = q("SELECT COUNT(*) n, COALESCE(SUM(balance_cents),0) bal, COALESCE(SUM(freeplay_cents),0) fp FROM users WHERE role = 'client'");
@@ -368,5 +399,5 @@ function settleCustomProp(propId, winner) {
 module.exports = {
   settleCustomProp, parlayConflict,
   UserError, americanToDecimal, decimalToAmerican, applyTransaction, placeBet, getBet, listBets,
-  settleLeg, settleBet, autoGrade, gradeLeg, evaluate, summary, exposure, teasePoint,
+  settleLeg, settleBet, autoGrade, gradeLeg, evaluate, summary, exposure, teasePoint, weekStart, weeklyNet,
 };

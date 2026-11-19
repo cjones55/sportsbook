@@ -101,6 +101,12 @@ test('full betting flow', async () => {
   assert.equal(pw.body.bet.status, 'won');
   assert.equal(pw.body.bet.payout_cents, Math.floor(5000 * bets.americanToDecimal(tot.price)));
 
+  // This week: lost the $100 single, won the $50 parlay. Credit adjustments don't count.
+  const week = (await joe('GET', '/api/me')).body.week;
+  assert.equal(week.netCents, pw.body.bet.payout_cents - 5000 - 10000);
+  assert.equal(week.settledBets, 2);
+  assert.equal((await admin('GET', '/api/me')).body.week, null);
+
   // Credit adjustments.
   const w = await admin('POST', `/api/admin/users/${joeId}/credit`, { type: 'withdrawal', amount: '20', note: 'paid out' });
   assert.equal(w.body.balanceCents, 35000 + pw.body.bet.payout_cents - 2000);
@@ -577,4 +583,12 @@ test('alternate spreads and totals: priced per game, auto-graded, parlay rules',
   const after = bets.getBet(b.id);
   assert.ok(after.legs.every(l => l.status !== 'pending'), JSON.stringify(after.legs.map(l => l.status)));
   assert.notEqual(after.status, 'pending');
+});
+
+test('weeks start Monday midnight in the book time zone', () => {
+  const ws = d => bets.weekStart(new Date(d), 'America/New_York').toISOString();
+  assert.equal(ws('2026-11-19T16:00:00Z'), '2026-11-16T05:00:00.000Z'); // Thursday
+  assert.equal(ws('2026-11-16T05:00:00Z'), '2026-11-16T05:00:00.000Z'); // Monday 12:00 AM
+  assert.equal(ws('2026-11-16T04:59:59Z'), '2026-11-09T05:00:00.000Z'); // Sunday 11:59 PM
+  assert.equal(ws('2026-11-02T04:30:00Z'), '2026-10-26T04:00:00.000Z'); // across the DST change
 });

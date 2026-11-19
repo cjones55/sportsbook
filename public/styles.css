@@ -35,6 +35,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav::-webkit-scrollbar { display: none; }
 .nav a { color: var(--muted); padding: 7px 11px; border-radius: 8px; white-space: nowrap; font-weight: 600; font-size: .92rem; }
 .nav a.on { color: var(--text); background: var(--panel-2); }
+.week { line-height: 1.1; white-space: nowrap; padding-left: 14px; border-left: 1px solid var(--line); }
+.week b { display: block; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+.week span { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
 .balance { text-align: right; line-height: 1.1; white-space: nowrap; }
 .balance b { display: block; font-size: 1.05rem; color: var(--accent); }
 .balance span { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
