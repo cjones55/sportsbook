@@ -138,7 +138,10 @@ route('POST', '/api/logout', { auth: 'none' }, (req, res, { user }) => {
 });
 
 // Signed-in users
-route('GET', '/api/me', ({}, _res, { user }) => ({ user: publicUser(user), book: bookInfo() }));
+route('GET', '/api/me', ({}, _res, { user }) => ({
+  user: publicUser(user), book: bookInfo(),
+  week: user.role === 'client' ? bets.weeklyNet(user.id) : null,
+}));
 
 route('POST', '/api/me/password', (req, res, { user, body }) => {
   if (!auth.verifyPassword(String(body.current || ''), user.pass_hash)) throw new UserError('Current password is wrong.', 400);

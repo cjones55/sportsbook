@@ -102,6 +102,7 @@
     app.innerHTML = `
       <header class="top"><div class="top-inner">
         <div class="brand"><img src="/icon.svg" alt="">${esc(state.book.name)}</div>
+        ${isAdmin ? '' : `<div class="week" id="weekBox" title="Settled bets since Monday">${weekHtml(state.week)}</div>`}
         <nav class="nav">${links.map(([k, t]) => `<a href="#/${k}" class="${k === active ? 'on' : ''}">${t}</a>`).join('')}</nav>
         ${isAdmin ? `<div class="balance"><span>Admin</span><b>${esc(state.me.username)}</b></div>`
           : `<div class="balance"><span>Credit</span><b id="bal">${money(state.me.balanceCents)}</b></div>
@@ -111,6 +112,17 @@
       ${!state.book.bettingOpen ? `<div class="banner">Betting is paused right now.</div>` : ''}
       <div id="view">${content}</div></main>`;
     return $('#view');
+  }
+
+  // This week's net on settled bets, green when up and red when down.
+  function weekHtml(w) {
+    const n = w ? w.netCents : 0;
+    return `<span>This week</span><b class="${n > 0 ? 'pos' : n < 0 ? 'neg' : ''}">${n > 0 ? '+' : n < 0 ? '−' : ''}${money(Math.abs(n))}</b>`;
+  }
+  function setWeek(w) {
+    state.week = w;
+    const box = $('#weekBox');
+    if (box) box.innerHTML = weekHtml(w);
   }
 
   function setBalance(c, fp) {
@@ -1064,6 +1076,7 @@
       const r = await api('GET', '/api/me');
       state.me = r.user;
       state.book = r.book;
+      state.week = r.week;
       document.title = r.book.name;
     } catch {
       state.me = null;
@@ -1076,7 +1089,7 @@
   // Keep the balance fresh (bets get graded in the background).
   setInterval(async () => {
     if (!state.me || state.me.role !== 'client' || document.hidden) return;
-    try { const r = await api('GET', '/api/me'); setBalance(r.user.balanceCents, r.user.freeplayCents); } catch { /* ignore */ }
+    try { const r = await api('GET', '/api/me'); setBalance(r.user.balanceCents, r.user.freeplayCents); setWeek(r.week); } catch { /* ignore */ }
   }, 60e3);
   boot();
 })();
