@@ -214,6 +214,7 @@ route('GET', '/api/admin/blackjack', { auth: 'admin' }, (req, res, { query }) =>
   hands: blackjack.listAdmin({ userId: query.get('user') ? Number(query.get('user')) : undefined, limit: Math.min(500, Number(query.get('limit')) || 200) }),
   stats: blackjack.stats(),
 }));
+route('POST', '/api/admin/blackjack/remove', { auth: 'admin' }, (req, res, { user, body }) => blackjack.removeHands(body.ids, { by: user.id }));
 route('POST', '/api/admin/blackjack/:id/void', { auth: 'admin' }, (req, res, { params }) => blackjack.voidHand(Number(params.id)));
 
 route('GET', '/api/admin/exposure', { auth: 'admin' }, () => ({ exposure: bets.exposure() }));

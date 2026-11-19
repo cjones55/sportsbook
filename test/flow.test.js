@@ -708,3 +708,34 @@ test('blackjack: hands are dealt, played and paid from credit, and the bookie se
   assert.equal((await p('POST', '/api/blackjack/deal', { bet: 10 })).status, 400);
   await admin('PATCH', '/api/admin/settings', { blackjack_enabled: '1' });
 });
+
+test('blackjack: the bookie can take test hands off the books', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const { body: { user } } = await admin('POST', '/api/admin/users', { username: 'bjtest', password: 'secret1', credit: '200' });
+  const p = client();
+  await p('POST', '/api/login', { username: 'bjtest', password: 'secret1' });
+  const bal = () => db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(user.id).balance_cents;
+  const ids = [];
+  for (let i = 0; i < 6; i++) {
+    let h = (await p('POST', '/api/blackjack/deal', { bet: 10 })).body.hand;
+    while (h.status === 'playing' && i < 5) h = (await p('POST', '/api/blackjack/action', { action: h.hands.find(x => x.active).total < 17 ? 'hit' : 'stand' })).body.hand;
+    ids.push(h.id);
+  }
+  // Keep the first hand; remove the rest, including one still being played.
+  const keep = db.prepare('SELECT * FROM blackjack_hands WHERE id = ?').get(ids[0]);
+  const keptNet = keep.payout_cents - keep.total_bet_cents;
+  assert.equal((await p('POST', '/api/admin/blackjack/remove', { ids: ids.slice(1) })).status, 403);
+  const r = await admin('POST', '/api/admin/blackjack/remove', { ids: ids.slice(1) });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.removed, 5);
+  assert.equal(bal(), 20000 + keptNet);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM blackjack_hands WHERE user_id = ?').get(user.id).n, 1);
+  const tx = db.prepare('SELECT * FROM transactions WHERE user_id = ? ORDER BY id').all(user.id);
+  assert.equal(tx.at(-1).type, 'adjustment');
+  assert.equal(tx.reduce((a, t) => a + t.amount_cents, 0), bal());
+  assert.equal((await admin('GET', '/api/admin/users')).body.users.find(u => u.id === user.id).bookProfitCents, -keptNet);
+  assert.equal((await admin('POST', '/api/admin/blackjack/remove', { ids: [ids[1]] })).status, 404);
+  // The client can deal again (the open hand is gone).
+  assert.equal((await p('POST', '/api/blackjack/deal', { bet: 10 })).status, 200);
+});
