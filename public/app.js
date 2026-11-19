@@ -96,7 +96,7 @@
     const isAdmin = state.me.role === 'admin';
     const links = isAdmin
       ? [['admin', 'Dashboard'], ['admin/clients', 'Clients'], ['admin/bets', 'Bets'], ['admin/props', 'Props'], ['admin/risk', 'Risk'], ['admin/ledger', 'Ledger'], ['admin/settings', 'Settings'], ['odds', 'Odds board'], ['account', 'Account']]
-      : [['', 'Odds'], ['bets', 'My bets'], ['account', 'Account']];
+      : [['', 'Odds'], ['bets', 'My bets'], ...(state.book.blackjackEnabled ? [['blackjack', 'Blackjack']] : []), ['account', 'Account']];
     const active = links.map(l => l[0]).filter(k => r === k || (k && r.startsWith(k + '/'))).sort((a, b) => b.length - a.length)[0] ?? '';
     app.innerHTML = `
       <header class="top"><div class="top-inner">
@@ -521,6 +521,101 @@
     $('#list', view).innerHTML = bets.length ? bets.map(b => betCard(b)).join('') : `<div class="empty">${tab === 'open' ? 'No open bets. Head to the odds board to make a pick.' : 'No settled bets yet.'}</div>`;
   }
 
+  // ---------- blackjack ----------
+  const SUIT = { S: '♠\uFE0E', H: '♥\uFE0E', D: '♦\uFE0E', C: '♣\uFE0E' };
+  const cardHtml = c => c ? `<span class="card ${'HD'.includes(c.slice(-1)) ? 'red' : ''}"><b>${esc(c.slice(0, -1))}</b><i>${SUIT[c.slice(-1)]}</i></span>` : '<span class="card back"></span>';
+  const BJ_RESULT = { blackjack: 'Blackjack', win: 'Win', lose: 'Lose', bust: 'Bust', push: 'Push', void: 'Void' };
+  const bjPill = r => `<span class="pill ${r === 'win' || r === 'blackjack' ? 'won' : r === 'push' || r === 'void' ? 'push' : r ? 'lost' : 'pending'}">${esc(BJ_RESULT[r] || 'playing')}</span>`;
+  const handTotal = h => (h.soft && h.total < 21 && h.cards.length ? `${h.total - 10}/${h.total}` : String(h.total));
+  const cardsLine = cards => cards.map(c => c ? esc(c.slice(0, -1) + SUIT[c.slice(-1)]) : '?').join(' ');
+
+  // One finished hand as a row: what the dealer and the player held, stake and payout.
+  function bjRow(h, admin) {
+    const net = h.payoutCents - h.totalBetCents;
+    return `<tr>
+      <td class="small">${esc(sqlTime(h.createdAt))}<div class="muted">#${h.id}</div></td>
+      ${admin ? `<td><a href="#/admin/clients/${h.userId}">${esc(h.username)}</a></td>` : ''}
+      <td class="small">${h.hands.map(x => `${cardsLine(x.cards)} <span class="muted">(${x.total}${x.doubled ? ', doubled' : ''})</span>${h.hands.length > 1 && x.result ? ' ' + esc(BJ_RESULT[x.result]) : ''}`).join('<br>')}</td>
+      <td class="small hide-sm">${cardsLine(h.dealer.cards)} <span class="muted">(${h.dealer.total})</span></td>
+      <td>${bjPill(h.status === 'playing' ? null : h.result)}</td>
+      <td class="r num">${money(h.totalBetCents)}</td>
+      <td class="r num ${h.status === 'playing' ? '' : net >= 0 ? 'pos' : 'neg'}">${h.status === 'playing' ? '–' : signedMoney(net)}
+        ${admin && h.inProgress ? `<div><button class="btn sm danger" data-bjvoid="${h.id}">Void</button></div>` : ''}</td></tr>`;
+  }
+  function bjTable(hands, admin) {
+    if (!hands.length) return '<div class="muted">No hands yet.</div>';
+    return `<div class="table-wrap"><table><thead><tr><th>When</th>${admin ? '<th>Client</th>' : ''}<th>Player</th><th class="hide-sm">Dealer</th><th>Result</th><th class="r">Bet</th><th class="r">Won/lost</th></tr></thead>
+      <tbody>${hands.map(h => bjRow(h, admin)).join('')}</tbody></table></div>`;
+  }
+  function wireBjVoid(root, reload) {
+    $$('[data-bjvoid]', root).forEach(btn => btn.onclick = async () => {
+      if (!confirm('Void this unfinished hand and refund everything bet on it?')) return;
+      try { await api('POST', `/api/admin/blackjack/${btn.dataset.bjvoid}/void`); toast('Hand voided.'); reload(); }
+      catch (e) { toast(e.message, true); }
+    });
+  }
+
+  async function renderBlackjack() {
+    const view = shell('<h1>Blackjack</h1><div id="bj"><div class="empty">Loading…</div></div>');
+    const d = await api('GET', '/api/blackjack');
+    let hand = d.hand, history = d.history, busy = false;
+    const last = (() => { try { return localStorage.getItem('bjBet'); } catch { return null; } })();
+    let bet = last || (Math.max(d.minCents, 1000) / 100).toFixed(0);
+    const draw = () => {
+      const playing = hand && hand.status === 'playing';
+      const net = hand && !playing ? hand.payoutCents - hand.totalBetCents : 0;
+      const msg = !hand ? '' : playing ? '' : hand.result === 'blackjack' ? `Blackjack! You win ${money(net)}.`
+        : net > 0 ? `You win ${money(net)}.` : net < 0 ? (hand.result === 'bust' ? `Bust. You lose ${money(-net)}.` : `Dealer wins. You lose ${money(-net)}.`) : 'Push. Your bet is returned.';
+      $('#bj', view).innerHTML = `
+        <div class="bj-table">
+          <div class="bj-side"><div class="bj-label">Dealer ${hand ? `<b>${hand.dealer.total}</b>` : ''}</div>
+            <div class="bj-cards">${hand ? hand.dealer.cards.map(cardHtml).join('') : '<span class="card ghost"></span><span class="card ghost"></span>'}</div></div>
+          ${msg ? `<div class="bj-msg ${net > 0 ? 'pos' : net < 0 ? 'neg' : ''}">${esc(msg)}</div>` : '<div class="bj-msg muted small">Blackjack pays 3 to 2 · Dealer stands on soft 17</div>'}
+          <div class="bj-hands">${hand ? hand.hands.map(h => `
+            <div class="bj-side ${h.active ? 'active' : ''} ${hand.hands.length > 1 ? 'split' : ''}">
+              <div class="bj-cards">${h.cards.map(cardHtml).join('')}</div>
+              <div class="bj-label"><b>${handTotal(h)}</b> · ${money(h.bet)}${h.doubled ? ' doubled' : ''} ${!playing && hand.hands.length > 1 ? bjPill(h.result) : ''}</div>
+            </div>`).join('') : '<div class="bj-side"><div class="bj-cards"><span class="card ghost"></span><span class="card ghost"></span></div><div class="bj-label">You</div></div>'}</div>
+        </div>
+        <div class="panel bj-controls">
+          ${playing ? `<div class="row" style="justify-content:center">${['hit', 'stand', 'double', 'split'].map(a => `<button class="btn ${a === 'hit' || a === 'stand' ? 'primary' : ''}" data-act="${a}" ${hand.actions.includes(a) ? '' : 'disabled'}>${a[0].toUpperCase() + a.slice(1)}</button>`).join('')}</div>`
+            : d.enabled ? `<form id="deal" class="row" style="justify-content:center">
+              <div class="row" style="gap:6px">${[5, 10, 25, 50, 100].filter(v => v * 100 >= d.minCents && (!d.maxCents || v * 100 <= d.maxCents)).map(v => `<button type="button" class="btn sm chipbtn" data-chip="${v}">$${v}</button>`).join('')}</div>
+              <input type="number" name="bet" min="${d.minCents / 100}" ${d.maxCents ? `max="${d.maxCents / 100}"` : ''} step="0.01" value="${esc(bet)}" style="width:110px" aria-label="Bet in dollars">
+              <button class="btn primary" style="padding:9px 26px">Deal</button></form>
+              <p class="muted small" style="text-align:center;margin:8px 0 0">Bets ${money(d.minCents)} to ${money(d.maxCents)} from your credit. Doubles and splits take another bet the same size.</p>`
+            : '<p class="muted" style="text-align:center;margin:0">Blackjack is closed right now.</p>'}
+        </div>
+        <div class="panel"><h3>Your recent hands</h3>${bjTable(history, false)}</div>`;
+      const form = $('#deal', view);
+      if (form) {
+        $$('[data-chip]', form).forEach(b => b.onclick = () => { $('[name=bet]', form).value = b.dataset.chip; });
+        form.onsubmit = async e => {
+          e.preventDefault();
+          if (busy) return;
+          busy = true;
+          bet = $('[name=bet]', form).value;
+          try { localStorage.setItem('bjBet', bet); } catch { /* ignore */ }
+          try { const r = await api('POST', '/api/blackjack/deal', { bet }); hand = r.hand; setBalance(r.balanceCents); after(); }
+          catch (err) { toast(err.message, true); }
+          busy = false;
+        };
+      }
+      $$('[data-act]', view).forEach(b => b.onclick = async () => {
+        if (busy) return;
+        busy = true;
+        try { const r = await api('POST', '/api/blackjack/action', { action: b.dataset.act }); hand = r.hand; setBalance(r.balanceCents); after(); }
+        catch (err) { toast(err.message, true); }
+        busy = false;
+      });
+    };
+    const after = () => {
+      if (hand.status !== 'playing') history = [hand, ...history].slice(0, 20);
+      draw();
+    };
+    draw();
+  }
+
   async function renderAccount() {
     const isClient = state.me.role === 'client';
     const view = shell(`<h1>Account</h1>
@@ -544,7 +639,7 @@
     }
   }
 
-  const TX_LABEL = { freeplay: 'Free play added', freeplay_remove: 'Free play removed', deposit: 'Credit added', withdrawal: 'Credit removed', adjustment: 'Adjustment', bet: 'Bet placed', payout: 'Winnings', refund: 'Refund', regrade: 'Regrade' };
+  const TX_LABEL = { freeplay: 'Free play added', freeplay_remove: 'Free play removed', deposit: 'Credit added', withdrawal: 'Credit removed', adjustment: 'Adjustment', bet: 'Bet placed', payout: 'Winnings', refund: 'Refund', regrade: 'Regrade', blackjack: 'Blackjack bet', blackjack_win: 'Blackjack win' };
   function txTable(rows, showUser) {
     if (!rows.length) return '<div class="muted">Nothing yet.</div>';
     return `<table><thead><tr><th>When</th>${showUser ? '<th>Client</th>' : ''}<th>Type</th><th class="hide-sm">Note</th><th class="r">Amount</th><th class="r">Balance after</th></tr></thead><tbody>
@@ -557,16 +652,18 @@
   // ---------- admin ----------
   async function renderDashboard() {
     const view = shell('<h1>Dashboard</h1><div id="d"><div class="empty">Loading…</div></div>');
-    const { summary: s, odds: o } = await api('GET', '/api/admin/summary');
+    const { summary: s, blackjack: bj, odds: o } = await api('GET', '/api/admin/summary');
+    const profit = s.bookProfitCents + bj.profitCents, week = s.weekProfitCents + bj.weekProfitCents;
     const share = location.origin + '/';
     $('#d', view).innerHTML = `
       <div class="stats">
-        <div class="stat"><span>Book profit (all time)</span><b class="${s.bookProfitCents >= 0 ? 'pos' : 'neg'}">${signedMoney(s.bookProfitCents)}</b><small>on ${money(s.handleCents)} settled handle</small></div>
-        <div class="stat"><span>Last 7 days</span><b class="${s.weekProfitCents >= 0 ? 'pos' : 'neg'}">${signedMoney(s.weekProfitCents)}</b><small>book profit</small></div>
+        <div class="stat"><span>Book profit (all time)</span><b class="${profit >= 0 ? 'pos' : 'neg'}">${signedMoney(profit)}</b><small>on ${money(s.handleCents)} settled handle${bj.hands ? ` · ${signedMoney(bj.profitCents)} of it from blackjack` : ''}</small></div>
+        <div class="stat"><span>Last 7 days</span><b class="${week >= 0 ? 'pos' : 'neg'}">${signedMoney(week)}</b><small>book profit</small></div>
         <div class="stat"><span>Open bets</span><b>${s.openBets}</b><small>${money(s.openStakeCents)} staked</small></div>
         <div class="stat"><span>Max liability</span><b>${money(s.openLiabilityCents)}</b><small>if every open bet wins</small></div>
         <div class="stat"><span>Clients</span><b>${s.clients}</b><small>${money(s.clientBalanceCents)} total credit${s.clientFreeplayCents ? ` · ${money(s.clientFreeplayCents)} free play` : ''}</small></div>
         <div class="stat"><span>Today</span><b>${s.todayBets}</b><small>${money(s.todayStakeCents)} wagered</small></div>
+        ${bj.hands || bj.playing ? `<div class="stat"><span>Blackjack</span><b class="${bj.profitCents >= 0 ? 'pos' : 'neg'}">${signedMoney(bj.profitCents)}</b><small>${bj.hands} hands · <a href="#/admin/bets" data-bjtab>see hands</a></small></div>` : ''}
       </div>
       ${s.needsGrading ? `<div class="banner">${s.needsGrading} open bet${s.needsGrading > 1 ? 's have' : ' has'} a game that started over 12 hours ago. <a href="#/admin/bets">Grade them</a>.</div>` : ''}
       <div class="panel"><h3>Share with your clients</h3>
@@ -577,6 +674,8 @@
         ${o.quotaRemaining ? ` <span class="muted">${esc(o.quotaRemaining)} API requests left this month.</span>` : ''}</p>
         ${o.lastError ? `<p class="neg small">${esc(o.lastError)}</p>` : ''}</div>
       <div class="panel"><div class="row between"><h3 style="margin:0">Latest bets</h3><a href="#/admin/bets">All bets</a></div><div id="latest" style="margin-top:12px"></div></div>`;
+    const bjLink = $('[data-bjtab]', view);
+    if (bjLink) bjLink.onclick = () => { state.adminBetsTab = 'blackjack'; };
     $('#copy', view).onclick = () => { navigator.clipboard.writeText(share).then(() => toast('Link copied.')); };
     const { bets } = await api('GET', '/api/admin/bets?limit=5');
     const latest = $('#latest', view);
@@ -636,7 +735,7 @@
 
   async function renderClient(id) {
     const view = shell('<div id="c"><div class="empty">Loading…</div></div>');
-    const { user: u, bets, transactions } = await api('GET', '/api/admin/users/' + id);
+    const { user: u, bets, transactions, blackjack: bjHands } = await api('GET', '/api/admin/users/' + id);
     const isClient = u.role === 'client';
     $('#c', view).innerHTML = `
       <p><a href="#/admin/clients">← Clients</a></p>
@@ -663,6 +762,7 @@
         <label class="field"><span>Private notes</span><textarea name="notes" rows="2">${esc(u.notes || '')}</textarea></label>
         <button class="btn primary">Save</button></form></div>
       ${isClient ? `<div class="panel"><h3>Bets</h3><div id="ub">${bets.length ? bets.map(b => betCard(b, { admin: true })).join('') : '<div class="muted">No bets yet.</div>'}</div></div>
+      ${bjHands && bjHands.length ? `<div class="panel" id="ubj"><h3>Blackjack</h3>${bjTable(bjHands, true)}</div>` : ''}
       <div class="panel"><h3>Credit history</h3><div class="table-wrap">${txTable(transactions, false)}</div></div>` : ''}`;
     const reload = () => renderClient(id);
     const cr = $('#cr', view);
@@ -680,13 +780,15 @@
     };
     const ub = $('#ub', view);
     if (ub) wireSettle(ub, reload);
+    const ubj = $('#ubj', view);
+    if (ubj) wireBjVoid(ubj, reload);
   }
 
   async function renderAdminBets() {
     const tab = state.adminBetsTab || 'open';
     const view = shell(`<div class="row between"><h1>Bets</h1><button class="btn" id="grade">Grade finished games</button></div>
-      <div class="tabs" style="max-width:560px"><button data-t="open" class="${tab === 'open' ? 'on' : ''}">Open</button><button data-t="props" class="${tab === 'props' ? 'on' : ''}">Props to grade</button><button data-t="settled" class="${tab === 'settled' ? 'on' : ''}">Settled</button><button data-t="" class="${tab === '' ? 'on' : ''}">All</button></div>
-      <p class="muted small">Games are graded automatically from final scores every 15 minutes when the feed has them. Props are never graded automatically (the feed has no player stats), and a parlay with a prop in it waits until you grade that pick: grade them here with the buttons on each pick, or grade your own props in one go under <a href="#/admin/props">Props</a>. Use the buttons to fix any result; credit is corrected automatically.</p>
+      <div class="tabs" style="max-width:680px"><button data-t="open" class="${tab === 'open' ? 'on' : ''}">Open</button><button data-t="props" class="${tab === 'props' ? 'on' : ''}">Props to grade</button><button data-t="settled" class="${tab === 'settled' ? 'on' : ''}">Settled</button><button data-t="" class="${tab === '' ? 'on' : ''}">All</button><button data-t="blackjack" class="${tab === 'blackjack' ? 'on' : ''}">Blackjack</button></div>
+      <p class="muted small ${tab === 'blackjack' ? 'hidden' : ''}">Games are graded automatically from final scores every 15 minutes when the feed has them. Props are never graded automatically (the feed has no player stats), and a parlay with a prop in it waits until you grade that pick: grade them here with the buttons on each pick, or grade your own props in one go under <a href="#/admin/props">Props</a>. Use the buttons to fix any result; credit is corrected automatically.</p>
       <div id="list"><div class="empty">Loading…</div></div>`);
     $$('[data-t]', view).forEach(b => b.onclick = () => { state.adminBetsTab = b.dataset.t; renderAdminBets(); });
     $('#grade', view).onclick = async () => {
@@ -697,8 +799,20 @@
         renderAdminBets();
       } catch (e) { toast(e.message, true); }
     };
-    const { bets } = await api('GET', '/api/admin/bets?status=' + tab);
     const list = $('#list', view);
+    if (tab === 'blackjack') {
+      const { hands, stats: b } = await api('GET', '/api/admin/blackjack');
+      list.innerHTML = `<div class="stats">
+          <div class="stat"><span>Blackjack profit</span><b class="${b.profitCents >= 0 ? 'pos' : 'neg'}">${signedMoney(b.profitCents)}</b><small>${b.hands} hands · ${money(b.wageredCents)} wagered</small></div>
+          <div class="stat"><span>Last 7 days</span><b class="${b.weekProfitCents >= 0 ? 'pos' : 'neg'}">${signedMoney(b.weekProfitCents)}</b><small>blackjack profit</small></div>
+          <div class="stat"><span>Today</span><b>${b.todayHands}</b><small>${money(b.todayWageredCents)} wagered</small></div>
+          <div class="stat"><span>Being played</span><b>${b.playing}</b><small>${money(b.playingCents)} on the table</small></div></div>
+        <p class="muted small">Every hand is dealt and paid by the server from a freshly shuffled 6-deck shoe, so there is nothing to grade. A hand a client left unfinished stays open; you can void it to refund the bet. Change limits or turn blackjack off in <a href="#/admin/settings">Settings</a>.</p>
+        <div class="panel">${bjTable(hands, true)}</div>`;
+      wireBjVoid(list, renderAdminBets);
+      return;
+    }
+    const { bets } = await api('GET', '/api/admin/bets?status=' + tab);
     list.innerHTML = bets.length ? bets.map(b => betCard(b, { admin: true })).join('') : '<div class="empty">No bets here.</div>';
     wireSettle(list, renderAdminBets);
   }
@@ -852,6 +966,13 @@
         ${['2', '3', '4', '5', '6'].map(n => `<tr><td>${n}</td>${['6', '6.5', '7'].map(p => `<td><input type="text" inputmode="numeric" style="width:80px" data-teaser="${p}|${n}" value="${esc(teaser[p] && teaser[p][n] != null ? odds(teaser[p][n]) : '')}"></td>`).join('')}</tr>`).join('')}
         </tbody></table></div>
       </div>
+      <div class="panel"><h3>Blackjack</h3>
+        <label class="check"><input type="checkbox" name="blackjack_enabled" ${s.blackjack_enabled === '1' ? 'checked' : ''}> Clients can play blackjack with their credit</label>
+        <div class="grid2">
+          <label class="field"><span>Minimum blackjack bet ($)</span><input type="number" step="0.01" min="0" data-cents="blackjack_min_cents" value="${d(s.blackjack_min_cents)}"></label>
+          <label class="field"><span>Maximum blackjack bet ($)</span><input type="number" step="0.01" min="0" data-cents="blackjack_max_cents" value="${d(s.blackjack_max_cents)}"></label>
+        </div>
+        <p class="small muted" style="margin-top:0">6 decks shuffled every hand, dealer stands on soft 17, blackjack pays 3 to 2, double on any two cards, split up to 4 hands. The house edge is about half a percent.</p></div>
       <div class="panel"><h3>Client sign up</h3>
         <label class="check"><input type="checkbox" name="signup_enabled" ${s.signup_enabled === '1' ? 'checked' : ''}> Let people create their own account from the link</label>
         <div class="grid2">
@@ -929,6 +1050,7 @@
         return;
       }
       if (r === 'bets') return await renderMyBets();
+      if (r === 'blackjack') return await renderBlackjack();
       if (r === 'account') return await renderAccount();
       return await renderBoard();
     } catch (e) {

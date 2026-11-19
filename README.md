@@ -21,10 +21,12 @@ The first start creates the admin account from `ADMIN_USERNAME` / `ADMIN_PASSWOR
 **Clients**: odds board by sport (spread, moneyline, total), bet slip with straight bets,
 parlays or teasers (6, 6.5 or 7 points on football and basketball spreads and totals, 2 to 6 legs), props (a game's Props button, plus a Specials tab for the bookie's stand-alone props), open and settled bets, credit history, password change. Works on phones.
 
+**Blackjack**: clients play blackjack against the house with their credit (6 decks shuffled every hand, dealer stands on soft 17, blackjack pays 3 to 2, double on any two cards, split up to 4 hands). Cards are dealt on the server and the dealer's hole card stays hidden until the hand ends. The admin sees every hand under Bets > Blackjack and on each client's page, blackjack profit counts toward book profit, and Settings has an on/off switch and min/max bet (default $1 to $100). An unfinished hand can be voided for a refund.
+
 **Admin**
 - Dashboard: book profit, open action, max liability, share link.
 - Clients: create logins, add or remove credit, give free play (bets with it pay profit only; a push returns the free play), per-client max bet, reset passwords, suspend, private notes.
-- Bets: every bet; grade each pick Won / Lost / Push / Void by hand, or void a whole bet. Re-grading a settled bet corrects the client's credit automatically.
+- Bets: every bet, plus a Blackjack tab with every hand; grade each pick Won / Lost / Push / Void by hand, or void a whole bet. Re-grading a settled bet corrects the client's credit automatically.
 - Props: write your own props on a game (overtime? first score?) or stand-alone specials (MVP, futures), with your own odds. Pick the winner and every bet on it is graded; undo or void if needed.
 - Risk: open action per game and side.
 - Ledger: every credit movement.

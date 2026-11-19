@@ -18,6 +18,7 @@ const auth = require(SRC + 'auth');
 const odds = require(SRC + 'odds');
 const bets = require(SRC + 'bets');
 const props = require(SRC + 'props');
+const blackjack = require(SRC + 'blackjack');
 const { UserError } = bets;
 
 const PUBLIC = fs.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
@@ -75,6 +76,7 @@ function bookInfo() {
     maxPayoutCents: intSetting('max_payout_cents'),
     maxParlayLegs: intSetting('max_parlay_legs'),
     sameGameParlays: getSetting('same_game_parlays') === '1',
+    blackjackEnabled: blackjack.enabled(),
     teaserOdds: teaserOdds(),
     demoOdds: !odds.isLive(),
   };
@@ -177,6 +179,24 @@ route('GET', '/api/bets', (req, res, { user, query }) => ({
   bets: bets.listBets({ userId: user.id, status: query.get('status') || undefined, limit: 200 }),
 }));
 
+// Blackjack, played with the client's credit.
+function clientOnly(user) {
+  if (user.role !== 'client') throw new UserError('Admin accounts cannot play. Log in as a client.', 403);
+}
+route('GET', '/api/blackjack', (req, res, { user }) => ({
+  hand: blackjack.current(user), history: blackjack.history(user.id), enabled: blackjack.enabled(), ...blackjack.limits(),
+}));
+route('POST', '/api/blackjack/deal', (req, res, { user, body }) => {
+  clientOnly(user);
+  const hand = blackjack.deal(user, body.bet);
+  return { hand, balanceCents: db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(user.id).balance_cents };
+});
+route('POST', '/api/blackjack/action', (req, res, { user, body }) => {
+  clientOnly(user);
+  const hand = blackjack.act(user, String(body.action || ''));
+  return { hand, balanceCents: db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(user.id).balance_cents };
+});
+
 route('GET', '/api/transactions', (req, res, { user }) => ({
   transactions: db.prepare('SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 200').all(user.id),
 }));
@@ -184,8 +204,14 @@ route('GET', '/api/transactions', (req, res, { user }) => ({
 // ---------- admin ----------
 
 route('GET', '/api/admin/summary', { auth: 'admin' }, () => ({
-  summary: bets.summary(), odds: odds.status(), book: bookInfo(),
+  summary: bets.summary(), blackjack: blackjack.stats(), odds: odds.status(), book: bookInfo(),
 }));
+
+route('GET', '/api/admin/blackjack', { auth: 'admin' }, (req, res, { query }) => ({
+  hands: blackjack.listAdmin({ userId: query.get('user') ? Number(query.get('user')) : undefined, limit: Math.min(500, Number(query.get('limit')) || 200) }),
+  stats: blackjack.stats(),
+}));
+route('POST', '/api/admin/blackjack/:id/void', { auth: 'admin' }, (req, res, { params }) => blackjack.voidHand(Number(params.id)));
 
 route('GET', '/api/admin/exposure', { auth: 'admin' }, () => ({ exposure: bets.exposure() }));
 
@@ -193,7 +219,8 @@ route('GET', '/api/admin/users', { auth: 'admin' }, () => ({
   users: db.prepare(`SELECT u.*,
       (SELECT COUNT(*) FROM bets b WHERE b.user_id = u.id AND b.status = 'pending') open_bets,
       (SELECT COALESCE(SUM(stake_cents),0) FROM bets b WHERE b.user_id = u.id AND b.status = 'pending') open_stake,
-      (SELECT COALESCE(SUM(CASE WHEN freeplay = 1 THEN 0 ELSE stake_cents END - payout_cents),0) FROM bets b WHERE b.user_id = u.id AND b.status != 'pending') book_profit
+      (SELECT COALESCE(SUM(CASE WHEN freeplay = 1 THEN 0 ELSE stake_cents END - payout_cents),0) FROM bets b WHERE b.user_id = u.id AND b.status != 'pending')
+        + (SELECT COALESCE(SUM(total_bet_cents - payout_cents),0) FROM blackjack_hands h WHERE h.user_id = u.id AND h.status = 'done') book_profit
     FROM users u ORDER BY u.role, u.username COLLATE NOCASE`).all()
     .map(u => ({ ...adminUserView(u), openBets: u.open_bets, openStakeCents: u.open_stake, bookProfitCents: u.book_profit })),
 }));
@@ -221,6 +248,7 @@ route('GET', '/api/admin/users/:id', { auth: 'admin' }, (req, res, { params }) =
   return {
     user: adminUserView(u),
     bets: bets.listBets({ userId: u.id, limit: 100 }),
+    blackjack: blackjack.listAdmin({ userId: u.id, limit: 50 }),
     transactions: db.prepare('SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 100').all(u.id),
   };
 });
@@ -343,7 +371,8 @@ route('GET', '/api/admin/transactions', { auth: 'admin' }, (req, res, { query })
 
 const EDITABLE = ['book_name', 'betting_open', 'signup_enabled', 'signup_code', 'signup_starting_credit_cents',
   'min_bet_cents', 'max_bet_cents', 'max_payout_cents', 'max_parlay_legs', 'odds_api_key', 'odds_ttl_minutes',
-  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds', 'props_enabled', 'props_ttl_minutes', 'same_game_parlays'];
+  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds', 'props_enabled', 'props_ttl_minutes', 'same_game_parlays',
+  'blackjack_enabled', 'blackjack_min_cents', 'blackjack_max_cents'];
 
 // Accepts {"6": {"2": -110, "3": 180, ...}, "6.5": {...}, "7": {...}}.
 function cleanTeaserOdds(v) {
