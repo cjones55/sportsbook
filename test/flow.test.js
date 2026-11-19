@@ -602,5 +602,9 @@ test('weekly net includes blackjack hands when the game exists', () => {
   add('done', 1000, 0, '+0 seconds'); // lost $10
   add('playing', 500, 0, '+0 seconds'); // still in play
   add('done', 3000, 0, '-30 days'); // an earlier week
-  assert.equal(bets.weeklyNet(joe).netCents, before + 1000);
+  try {
+    assert.equal(bets.weeklyNet(joe).netCents, before + 1000);
+  } finally {
+    db.prepare('DELETE FROM blackjack_hands WHERE user_id = ?').run(joe); // leave the table clean for the blackjack tests
+  }
 });
