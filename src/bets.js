@@ -338,7 +338,13 @@ function weeklyNet(userId, now = new Date()) {
   const sqlStart = start.toISOString().replace('T', ' ').slice(0, 19);
   const r = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(payout_cents - CASE WHEN freeplay = 1 THEN 0 ELSE stake_cents END), 0) net
     FROM bets WHERE user_id = ? AND status != 'pending' AND settled_at >= ?`).get(userId, sqlStart);
-  return { netCents: r.net, settledBets: r.n, weekStart: start.toISOString(), timeZone: BOOK_TZ };
+  let net = r.net;
+  // Blackjack hands count too, once that game is installed (credit only, void hands refund in full).
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'blackjack_hands'").get()) {
+    net += db.prepare(`SELECT COALESCE(SUM(payout_cents - total_bet_cents), 0) net FROM blackjack_hands
+      WHERE user_id = ? AND status = 'done' AND settled_at >= ?`).get(userId, sqlStart).net;
+  }
+  return { netCents: net, settledBets: r.n, weekStart: start.toISOString(), timeZone: BOOK_TZ };
 }
 
 function summary() {

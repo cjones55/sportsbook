@@ -592,3 +592,15 @@ test('weeks start Monday midnight in the book time zone', () => {
   assert.equal(ws('2026-11-16T04:59:59Z'), '2026-11-09T05:00:00.000Z'); // Sunday 11:59 PM
   assert.equal(ws('2026-11-02T04:30:00Z'), '2026-10-26T04:00:00.000Z'); // across the DST change
 });
+
+test('weekly net includes blackjack hands when the game exists', () => {
+  db.exec(`CREATE TABLE IF NOT EXISTS blackjack_hands (id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, bet_cents INTEGER, total_bet_cents INTEGER, payout_cents INTEGER, state TEXT, settled_at TEXT)`);
+  const joe = db.prepare("SELECT id FROM users WHERE username = 'joe'").get().id;
+  const before = bets.weeklyNet(joe).netCents;
+  const add = (status, bet, paid, when) => db.prepare("INSERT INTO blackjack_hands(user_id, status, bet_cents, total_bet_cents, payout_cents, state, settled_at) VALUES(?, ?, ?, ?, ?, '{}', datetime('now', ?))").run(joe, status, bet, bet, paid, when);
+  add('done', 2000, 4000, '+0 seconds'); // won $20
+  add('done', 1000, 0, '+0 seconds'); // lost $10
+  add('playing', 500, 0, '+0 seconds'); // still in play
+  add('done', 3000, 0, '-30 days'); // an earlier week
+  assert.equal(bets.weeklyNet(joe).netCents, before + 1000);
+});
