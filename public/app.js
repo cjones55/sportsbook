@@ -546,6 +546,7 @@
   function bjRow(h, admin) {
     const net = h.payoutCents - h.totalBetCents;
     return `<tr>
+      ${admin ? `<td><input type="checkbox" data-bjpick="${h.id}" aria-label="Select hand #${h.id}"></td>` : ''}
       <td class="small">${esc(sqlTime(h.createdAt))}<div class="muted">#${h.id}</div></td>
       ${admin ? `<td><a href="#/admin/clients/${h.userId}">${esc(h.username)}</a></td>` : ''}
       <td class="small">${h.hands.map(x => `${cardsLine(x.cards)} <span class="muted">(${x.total}${x.doubled ? ', doubled' : ''})</span>${h.hands.length > 1 && x.result ? ' ' + esc(BJ_RESULT[x.result]) : ''}`).join('<br>')}</td>
@@ -557,7 +558,9 @@
   }
   function bjTable(hands, admin) {
     if (!hands.length) return '<div class="muted">No hands yet.</div>';
-    return `<div class="table-wrap"><table><thead><tr><th>When</th>${admin ? '<th>Client</th>' : ''}<th>Player</th><th class="hide-sm">Dealer</th><th>Result</th><th class="r">Bet</th><th class="r">Won/lost</th></tr></thead>
+    return `${admin ? `<div class="row" style="margin-bottom:8px"><button class="btn sm danger" data-bjremove disabled>Remove selected hands</button>
+      <span class="muted small">Takes test or mistaken hands off the books and puts the client's credit back as if they were never played.</span></div>` : ''}
+      <div class="table-wrap"><table><thead><tr>${admin ? '<th><input type="checkbox" data-bjall aria-label="Select all"></th>' : ''}<th>When</th>${admin ? '<th>Client</th>' : ''}<th>Player</th><th class="hide-sm">Dealer</th><th>Result</th><th class="r">Bet</th><th class="r">Won/lost</th></tr></thead>
       <tbody>${hands.map(h => bjRow(h, admin)).join('')}</tbody></table></div>`;
   }
   function wireBjVoid(root, reload) {
@@ -566,6 +569,21 @@
       try { await api('POST', `/api/admin/blackjack/${btn.dataset.bjvoid}/void`); toast('Hand voided.'); reload(); }
       catch (e) { toast(e.message, true); }
     });
+    const picks = () => $$('[data-bjpick]', root).filter(x => x.checked).map(x => Number(x.dataset.bjpick));
+    const btnRemove = $('[data-bjremove]', root);
+    const sync = () => { if (btnRemove) { const n = picks().length; btnRemove.disabled = !n; btnRemove.textContent = n ? `Remove ${n} hand${n > 1 ? 's' : ''}` : 'Remove selected hands'; } };
+    $$('[data-bjpick]', root).forEach(x => x.onchange = sync);
+    const all = $('[data-bjall]', root);
+    if (all) all.onchange = () => { $$('[data-bjpick]', root).forEach(x => { x.checked = all.checked; }); sync(); };
+    if (btnRemove) btnRemove.onclick = async () => {
+      const ids = picks();
+      if (!ids.length || !confirm(`Remove ${ids.length} hand${ids.length > 1 ? 's' : ''} for good? They leave blackjack history and profit, and the client's credit is set back as if they were never played (the ledger shows one adjustment).`)) return;
+      try {
+        const r = await api('POST', '/api/admin/blackjack/remove', { ids });
+        toast(`Removed ${r.removed} hand${r.removed > 1 ? 's' : ''}. Credit ${r.creditChangeCents ? signedMoney(r.creditChangeCents) : 'unchanged'}.`);
+        reload();
+      } catch (e) { toast(e.message, true); }
+    };
   }
 
   async function renderBlackjack() {

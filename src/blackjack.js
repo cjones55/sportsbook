@@ -269,4 +269,39 @@ function voidHand(id) {
   });
 }
 
-module.exports = { GameError, deal, act, current, history, listAdmin, stats, voidHand, enabled, limits, total, _newShoe: newShoe };
+// Take hands off the books entirely (test hands, mistakes): the hands are deleted, so they leave
+// blackjack history, stats and P/L, and the client's credit goes back to what it would be had they
+// never been played. The ledger keeps its lines plus one adjustment that reverses them, so it still adds up.
+function removeHands(ids, { by = null } = {}) {
+  ids = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(n => Number.isInteger(n) && n > 0))];
+  if (!ids.length) throw new GameError('Pick the hands to remove.');
+  return tx(() => {
+    const rows = db.prepare(`SELECT * FROM blackjack_hands WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+    if (rows.length !== ids.length) throw new GameError('Some of those hands no longer exist.', 404);
+    const perUser = new Map();
+    for (const h of rows) {
+      // What the hand moved the client's credit by: payout back minus stakes taken (a hand still
+      // being played has taken its stakes and paid nothing yet).
+      const net = (h.status === 'playing' ? 0 : h.payout_cents) - h.total_bet_cents;
+      const u = perUser.get(h.user_id) || { net: 0, ids: [] };
+      u.net += net; u.ids.push(h.id);
+      perUser.set(h.user_id, u);
+      db.prepare('DELETE FROM blackjack_hands WHERE id = ?').run(h.id);
+    }
+    let creditBack = 0;
+    for (const [userId, u] of perUser) {
+      const note = `Removed blackjack hand${u.ids.length > 1 ? 's' : ''} #${u.ids.sort((a, b) => a - b).join(', #')}`;
+      if (u.net !== 0) {
+        const cur = db.prepare('SELECT balance_cents FROM users WHERE id = ?').get(userId).balance_cents;
+        const after = cur - u.net;
+        db.prepare('UPDATE users SET balance_cents = ? WHERE id = ?').run(after, userId);
+        db.prepare("INSERT INTO transactions(user_id, type, amount_cents, balance_after_cents, note, created_by) VALUES(?, 'adjustment', ?, ?, ?, ?)")
+          .run(userId, -u.net, after, note, by);
+      }
+      creditBack -= u.net;
+    }
+    return { removed: rows.length, creditChangeCents: creditBack };
+  });
+}
+
+module.exports = { removeHands, GameError, deal, act, current, history, listAdmin, stats, voidHand, enabled, limits, total, _newShoe: newShoe };
