@@ -19,8 +19,8 @@ const isFeedMarket = market => !MAIN_MARKETS.includes(market);
 
 // Markets asked for per league. Each market the feed returns costs one request.
 const PROP_MARKETS = {
-  americanfootball_nfl: [...ALT_MARKETS, 'player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td', 'player_1st_td', 'team_totals'],
-  americanfootball_ncaaf: [...ALT_MARKETS, 'player_pass_yds', 'player_rush_yds', 'player_reception_yds', 'player_anytime_td', 'player_1st_td', 'team_totals'],
+  americanfootball_nfl: [...ALT_MARKETS, 'player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td', 'player_1st_td', 'player_tds_over', 'team_totals'],
+  americanfootball_ncaaf: [...ALT_MARKETS, 'player_pass_yds', 'player_rush_yds', 'player_reception_yds', 'player_anytime_td', 'player_1st_td', 'player_tds_over', 'team_totals'],
   basketball_nba: [...ALT_MARKETS, 'player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_points_rebounds_assists', 'team_totals'],
   basketball_ncaab: [...ALT_MARKETS],
   basketball_wncaab: [...ALT_MARKETS],
@@ -33,7 +33,7 @@ const TITLES = {
   team_totals: 'Team Total',
   player_pass_yds: 'Passing Yards', player_pass_tds: 'Passing TDs', player_rush_yds: 'Rushing Yards',
   player_reception_yds: 'Receiving Yards', player_receptions: 'Receptions', player_anytime_td: 'Anytime TD',
-  player_1st_td: 'First TD',
+  player_1st_td: 'First TD', player_tds_over: '2+ TDs',
   player_points: 'Points', player_rebounds: 'Rebounds', player_assists: 'Assists', player_threes: 'Threes Made',
   player_points_rebounds_assists: 'Pts + Reb + Ast',
   batter_hits: 'Hits', batter_home_runs: 'Home Runs', batter_total_bases: 'Total Bases', batter_rbis: 'RBIs',
@@ -101,11 +101,12 @@ function normalize(e) {
   for (const key of order) {
     for (const b of books) {
       const mk = (b.markets || []).find(x => x.key === key);
-      if (!mk || !mk.outcomes || !mk.outcomes.length) continue;
-      markets.push({
-        key, title: TITLES[key] || key,
-        outcomes: mk.outcomes.map(o => ({ name: o.name, description: o.description ?? null, price: Math.round(o.price), point: o.point ?? null })),
-      });
+      // Over 0.5 TDs is the same bet as Anytime TD, so the touchdowns market only offers 2+ and up.
+      const outcomes = (mk && mk.outcomes || [])
+        .filter(o => key !== 'player_tds_over' || (o.name === 'Over' && Number(o.point) >= 1.5))
+        .map(o => ({ name: o.name, description: o.description ?? null, price: Math.round(o.price), point: o.point ?? null }));
+      if (!outcomes.length) continue;
+      markets.push({ key, title: TITLES[key] || key, outcomes });
       bookmaker = bookmaker || b.title;
       break;
     }
@@ -119,11 +120,12 @@ const DEMO = {
   americanfootball_nfl: [
     ['QB', 'player_pass_yds', 245.5, 40], ['QB', 'player_pass_tds', 1.5, 0], ['RB', 'player_rush_yds', 64.5, 20],
     ['WR', 'player_reception_yds', 62.5, 20], ['WR', 'player_receptions', 4.5, 1], ['RB', 'player_anytime_td'], ['WR', 'player_anytime_td'],
-    ['RB', 'player_1st_td'], ['WR', 'player_1st_td'], ['TE', 'player_1st_td'],
+    ['RB', 'player_1st_td'], ['WR', 'player_1st_td'], ['TE', 'player_1st_td'], ['RB', 'player_tds_over'], ['WR', 'player_tds_over'],
   ],
   americanfootball_ncaaf: [
     ['QB', 'player_pass_yds', 235.5, 50], ['RB', 'player_rush_yds', 74.5, 25], ['WR', 'player_reception_yds', 58.5, 20],
     ['RB', 'player_anytime_td'], ['WR', 'player_anytime_td'], ['RB', 'player_1st_td'], ['WR', 'player_1st_td'],
+    ['RB', 'player_tds_over'], ['WR', 'player_tds_over'],
   ],
   basketball_nba: [
     ['G', 'player_points', 24.5, 6], ['F', 'player_points', 19.5, 5], ['F', 'player_rebounds', 8.5, 2],
@@ -155,7 +157,9 @@ function demoMarkets(event) {
     for (const team of [event.away_team, event.home_team]) {
       const description = `${nick(team)} ${pos}`;
       // First TD is a long shot (+500 to +1200); anytime TD is around +100 to +400.
-      if (key === 'player_1st_td') add(key, { name: 'Yes', description, price: 500 + Math.round(r() * 14) * 50, point: null });
+      // 2+ TDs: the feed's touchdowns market at 1.5 (Over only).
+      if (key === 'player_tds_over') add(key, { name: 'Over', description, price: 300 + Math.round(r() * 8) * 50, point: 1.5 });
+      else if (key === 'player_1st_td') add(key, { name: 'Yes', description, price: 500 + Math.round(r() * 14) * 50, point: null });
       else if (line === undefined) add(key, { name: 'Yes', description, price: 100 + Math.round(r() * 30) * 10, point: null });
       else ou(key, description, swing ? Math.floor(line + (r() - 0.5) * swing) + 0.5 : line);
     }
