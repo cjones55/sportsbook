@@ -302,7 +302,9 @@ async function autoGrade({ force = false } = {}) {
     .all(new Date(Date.now() - 2 * 3600e3).toISOString());
   if (!pending.length) return { graded: 0, errors: [] };
   const errors = [];
-  const needScores = [...new Set(pending.filter(l => !l.event_id.startsWith('demo_')).map(l => l.sport_key))];
+  // The scores feed only reaches back 3 days; older games are left for the bookie to grade.
+  const reach = new Date(Date.now() - 3 * 86400e3).toISOString();
+  const needScores = [...new Set(pending.filter(l => !l.event_id.startsWith('demo_') && l.commence_time > reach).map(l => l.sport_key))];
   const have = new Set(db.prepare('SELECT event_id FROM scores WHERE completed = 1').all().map(r => r.event_id));
   for (const sport of needScores) {
     if (pending.filter(l => l.sport_key === sport).every(l => have.has(l.event_id))) continue;

@@ -62,7 +62,7 @@ async function feedProps(sportKey, eventId) {
   // A copy fetched before the market list changed (e.g. First TD was added) is refetched right away.
   const asked = PROP_MARKETS[sportKey].join(',');
   if (cached && cached.asked === asked && Date.now() - cached.fetchedAt < ttl) return cached;
-  if (odds.quotaTooLow()) return cached;
+  if (!odds.canSpend('props', PROP_MARKETS[sportKey].length)) return cached;
   if (inflight.has(eventId)) return inflight.get(eventId);
   const p = (async () => {
     try {

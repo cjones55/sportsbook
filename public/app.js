@@ -7,6 +7,13 @@
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
   const money = c => usd.format((Number(c) || 0) / 100);
+  // "Using up to 15 requests a day so they last until Dec 1 (6 used today)."
+  const budgetLine = b => {
+    const until = new Date(b.resetsOn + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    return b.perDay > 0
+      ? `Pacing to about ${b.perDay} requests a day so they last until the reset on ${until} (${b.usedToday} used today).`
+      : `Too few requests left to refresh until the reset on ${until}. Clients see the last lines loaded.`;
+  };
   const signedMoney = c => (c > 0 ? '+' : '') + money(c);
   const odds = a => (a > 0 ? '+' + a : String(a));
   const pt = p => (p == null ? '' : p > 0 ? '+' + p : String(p));
@@ -737,6 +744,7 @@
       <div class="panel"><h3>Odds feed</h3>
         <p style="margin:0">${o.live ? `Live odds from The Odds API (${esc(o.bookmakers.split(',')[0])} first).` : 'Demo odds. Add an API key in Settings for real lines.'}
         ${o.quotaRemaining ? ` <span class="muted">${esc(o.quotaRemaining)} API requests left this month.</span>` : ''}</p>
+        ${o.budget ? `<p class="muted small" style="margin:6px 0 0">${budgetLine(o.budget)}</p>` : ''}
         ${o.lastError ? `<p class="neg small">${esc(o.lastError)}</p>` : ''}</div>
       <div class="panel"><div class="row between"><h3 style="margin:0">Latest bets</h3><a href="#/admin/bets">All bets</a></div><div id="latest" style="margin-top:12px"></div></div>`;
     const bjLink = $('[data-bjtab]', view);
@@ -1107,11 +1115,11 @@
           <label class="field"><span>Starting credit for new sign ups ($)</span><input type="number" step="0.01" min="0" data-cents="signup_starting_credit_cents" value="${d(s.signup_starting_credit_cents)}"></label>
         </div></div>
       <div class="panel"><h3>Odds feed</h3>
-        <p class="small muted" style="margin-top:0">Real lines come from <a href="https://the-odds-api.com" target="_blank" rel="noopener">The Odds API</a>, which carries DraftKings, FanDuel, BetMGM and more. Its free plan gives 500 requests a month; each sport refresh uses about 3.</p>
-        <p style="margin-top:0">Status: <b>${o.live ? 'Live' : 'Demo odds'}</b>${o.quotaRemaining ? ` · ${esc(o.quotaRemaining)} requests left this month` : ''}${o.lastError ? `<br><span class="neg small">${esc(o.lastError)}</span>` : ''}</p>
+        <p class="small muted" style="margin-top:0">Real lines come from <a href="https://the-odds-api.com" target="_blank" rel="noopener">The Odds API</a>, which carries DraftKings, FanDuel, BetMGM and more. Its free plan gives 500 requests a month; each sport refresh uses about 3. The site spreads what's left evenly over the days until the quota resets on the 1st, so lines refresh less often when requests run low and it never runs out mid-month.</p>
+        <p style="margin-top:0">Status: <b>${o.live ? 'Live' : 'Demo odds'}</b>${o.quotaRemaining ? ` · ${esc(o.quotaRemaining)} requests left this month` : ''}${o.budget ? `<br><span class="muted small">${budgetLine(o.budget)}</span>` : ''}${o.lastError ? `<br><span class="neg small">${esc(o.lastError)}</span>` : ''}</p>
         <label class="field"><span>API key ${envKey && !s.odds_api_key ? '(set in the server environment)' : ''}</span><input type="text" name="odds_api_key" value="${esc(s.odds_api_key)}" placeholder="Paste your key from the-odds-api.com" autocomplete="off"></label>
         <div class="grid2">
-          <label class="field"><span>Refresh odds every (minutes)</span><input type="number" min="1" name="odds_ttl_minutes" value="${esc(s.odds_ttl_minutes)}"></label>
+          <label class="field"><span>Refresh odds at most every (minutes)</span><input type="number" min="1" name="odds_ttl_minutes" value="${esc(s.odds_ttl_minutes)}"></label>
           <label class="field"><span>Stop refreshing when fewer requests than this remain</span><input type="number" min="0" name="odds_quota_floor" value="${esc(s.odds_quota_floor)}"></label>
         </div>
         <label class="field"><span>Sportsbooks to copy lines from, in order of preference</span><input type="text" name="bookmakers" value="${esc(s.bookmakers)}"></label>

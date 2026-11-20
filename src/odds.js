@@ -37,6 +37,53 @@ function quotaTooLow() {
   return rem !== null && rem !== '' && Number(rem) < intSetting('odds_quota_floor');
 }
 
+// ---------- daily budget ----------
+// The Odds API quota resets on the 1st of each month. Whatever is left is split evenly over the
+// days until then, so the feed never runs dry mid-month. Each day's share is worked out from what
+// was left when the day began (UTC), so a quiet day leaves more for the days after it.
+
+const DAY = 86400e3;
+// Costs in requests: one per market per region (up to 10 bookmakers count as one region).
+const regions = () => Math.max(1, Math.ceil(String(getSetting('bookmakers') || '').split(',').filter(Boolean).length / 10));
+const ODDS_COST = () => MARKETS.length * regions();
+const SCORES_COST = 2;
+// Share of the day's budget each kind of request may use. Scores (which settle bets) come first,
+// then the main board; props and alt lines only get what the board leaves.
+const SHARE = { scores: 1, odds: 0.85, props: 0.4 };
+
+function resetAt(now = Date.now()) {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+}
+
+function budget(now = Date.now()) {
+  const rem = getSetting('odds_quota_remaining');
+  if (rem === null || rem === '') return null; // not known until the first request
+  const remaining = Number(rem);
+  const day = new Date(now).toISOString().slice(0, 10);
+  let start = Number(getSetting('odds_day_start'));
+  // New day, or the quota went up (monthly reset or a bigger plan): start the day over.
+  if (getSetting('odds_day') !== day || !(start >= remaining)) {
+    start = remaining;
+    setSetting('odds_day', day);
+    setSetting('odds_day_start', String(start));
+  }
+  const dayStart = Date.parse(day + 'T00:00:00Z');
+  const daysLeft = Math.max(1, Math.round((resetAt(now) - dayStart) / DAY));
+  const floor = intSetting('odds_quota_floor');
+  const perDay = Math.max(0, Math.floor((start - floor) / daysLeft));
+  return { remaining, perDay, usedToday: start - remaining, daysLeft, resetsOn: new Date(resetAt(now)).toISOString().slice(0, 10) };
+}
+
+// May we spend `cost` requests on this kind of request right now?
+function canSpend(kind, cost) {
+  if (quotaTooLow()) return false;
+  const b = budget();
+  if (!b) return true;
+  if (b.remaining - cost < intSetting('odds_quota_floor')) return false;
+  return b.usedToday + cost <= b.perDay * (SHARE[kind] ?? 1);
+}
+
 // ---------- sports list ----------
 
 let sportsMem = null; // { at, list }
@@ -83,7 +130,11 @@ async function getEvents(sportKey, { force = false } = {}) {
   const ttl = Math.max(1, intSetting('odds_ttl_minutes')) * 60e3;
   const fresh = cached && cached.source === 'live' && Date.now() - cached.fetchedAt < ttl;
   if (fresh && !force) return cached;
-  if (quotaTooLow() && !force) return cached || { fetchedAt: 0, source: 'live', events: [] };
+  // Out of today's budget: keep showing the last lines we have. A sport with nothing cached yet
+  // may still load once, as long as the monthly floor allows it.
+  if (!force && !(cached ? canSpend('odds', ODDS_COST()) : canSpend('scores', ODDS_COST()))) {
+    return cached || { fetchedAt: 0, source: 'live', events: [] };
+  }
   if (inflight.has(sportKey)) return inflight.get(sportKey);
   const p = (async () => {
     try {
@@ -134,9 +185,13 @@ function normalizeEvent(e) {
 
 // ---------- scores ----------
 
+const scoresAt = new Map(); // sport -> last scores request, so grading asks at most hourly per sport
+
 async function fetchScores(sportKey) {
   if (!isLive()) return 0;
-  if (quotaTooLow()) return 0;
+  if (Date.now() - (scoresAt.get(sportKey) || 0) < 60 * 60e3) return 0;
+  if (!canSpend('scores', SCORES_COST)) return 0;
+  scoresAt.set(sportKey, Date.now());
   const raw = await apiGet(`/sports/${encodeURIComponent(sportKey)}/scores`, { daysFrom: '3', dateFormat: 'iso' });
   let n = 0;
   for (const e of raw) {
@@ -265,12 +320,13 @@ function status() {
     quotaUsed: getSetting('odds_quota_used'),
     lastError: getSetting('odds_last_error') || null,
     ttlMinutes: intSetting('odds_ttl_minutes'),
+    budget: isLive() ? budget() : null,
     bookmakers: getSetting('bookmakers'),
   };
 }
 
 module.exports = {
   allSports, boardSports, getEvents, fetchScores, mockScoresFor, isLive, status, DEFAULT_GROUPS,
-  _resetSportsCache: () => { sportsMem = null; }, _mockEvents: mockEvents,
-  apiGet, quotaTooLow, rng, probToAmerican,
+  _resetSportsCache: () => { sportsMem = null; }, _resetScoresThrottle: () => scoresAt.clear(), _mockEvents: mockEvents,
+  apiGet, quotaTooLow, canSpend, budget, rng, probToAmerican,
 };
