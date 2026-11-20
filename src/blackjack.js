@@ -4,7 +4,7 @@
 // blackjack pays 3 to 2, double on any first two cards (also after a split), split pairs up to
 // 4 hands, split aces get one card each. No insurance or surrender.
 const crypto = require('node:crypto');
-const { db, tx, intSetting, getSetting } = require('./db');
+const { db, tx, intSetting, getSetting, setSetting } = require('./db');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS blackjack_hands (
@@ -22,6 +22,13 @@ CREATE TABLE IF NOT EXISTS blackjack_hands (
 CREATE INDEX IF NOT EXISTS idx_bj_user ON blackjack_hands(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_bj_status ON blackjack_hands(status);
 `);
+
+// One time: the bookie raised the blackjack max to $1,000 for everyone. Books that already saved
+// Settings hold the old $100 max, so apply it once; after that, Settings decides.
+if (getSetting('blackjack_max_1000_applied') !== '1') {
+  setSetting('blackjack_max_cents', '100000');
+  setSetting('blackjack_max_1000_applied', '1');
+}
 
 const { UserError: GameError } = require('./bets');
 

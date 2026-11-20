@@ -645,7 +645,7 @@
         <div class="panel bj-controls">
           ${playing ? `<div class="row" style="justify-content:center">${['hit', 'stand', 'double', 'split'].map(a => `<button class="btn ${a === 'hit' || a === 'stand' ? 'primary' : ''}" data-act="${a}" ${hand.actions.includes(a) ? '' : 'disabled'}>${a[0].toUpperCase() + a.slice(1)}</button>`).join('')}</div>`
             : d.enabled ? `<form id="deal" class="row" style="justify-content:center">
-              <div class="row" style="gap:6px">${[5, 10, 25, 50, 100].filter(v => v * 100 >= d.minCents && (!d.maxCents || v * 100 <= d.maxCents)).map(v => `<button type="button" class="btn sm chipbtn" data-chip="${v}">$${v}</button>`).join('')}</div>
+              <div class="row" style="gap:6px">${[5, 10, 25, 50, 100, 250, 500, 1000].filter(v => v * 100 >= d.minCents && (!d.maxCents || v * 100 <= d.maxCents)).map(v => `<button type="button" class="btn sm chipbtn" data-chip="${v}">$${v}</button>`).join('')}</div>
               <input type="number" name="bet" min="${d.minCents / 100}" ${d.maxCents ? `max="${d.maxCents / 100}"` : ''} step="0.01" value="${esc(bet)}" style="width:110px" aria-label="Bet in dollars">
               <button class="btn primary" style="padding:9px 26px">Deal</button></form>
               <p class="muted small" style="text-align:center;margin:8px 0 0">Bets ${money(d.minCents)} to ${money(d.maxCents)} from your credit. Doubles and splits take another bet the same size.</p>`

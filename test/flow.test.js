@@ -619,7 +619,8 @@ test('blackjack: hands are dealt, played and paid from credit, and the bookie se
 
   assert.equal((await admin('POST', '/api/blackjack/deal', { bet: 10 })).status, 403);
   assert.equal((await p('POST', '/api/blackjack/deal', { bet: 0.5 })).status, 400);
-  assert.equal((await p('POST', '/api/blackjack/deal', { bet: 500 })).status, 400);
+  assert.equal((await p('POST', '/api/blackjack/deal', { bet: 1500 })).status, 400);
+  assert.equal((await p('GET', '/api/blackjack')).body.maxCents, 100000);
   assert.equal((await p('POST', '/api/blackjack/action', { action: 'hit' })).status, 409);
 
   // Rig a hand: set the shoe so we know what comes next (cards are popped from the end).
