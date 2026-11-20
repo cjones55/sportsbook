@@ -132,6 +132,25 @@ addColumn('bet_legs', 'description', 'TEXT');
 addColumn('bet_legs', 'prop_name', 'TEXT');
 addColumn('bet_legs', 'prop_id', 'INTEGER');
 db.exec('CREATE INDEX IF NOT EXISTS idx_legs_prop ON bet_legs(prop_id)');
+// Profit boosts: the bookie raises the winnings (profit, not stake) on a bet by a percentage.
+db.exec(`CREATE TABLE IF NOT EXISTS boosts (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  pct INTEGER NOT NULL,
+  bet_type TEXT NOT NULL DEFAULT 'any',
+  sport_key TEXT,
+  min_legs INTEGER NOT NULL DEFAULT 1,
+  max_stake_cents INTEGER,
+  uses_per_client INTEGER NOT NULL DEFAULT 1,
+  user_id INTEGER REFERENCES users(id),
+  expires_at TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+addColumn('bets', 'boost_id', 'INTEGER');
+addColumn('bets', 'boost_pct', 'INTEGER');
+addColumn('bets', 'boost_extra_cents', 'INTEGER NOT NULL DEFAULT 0');
+db.exec('CREATE INDEX IF NOT EXISTS idx_bets_boost ON bets(boost_id, user_id)');
 
 // Run fn inside a transaction; nested calls join the outer one.
 let depth = 0;

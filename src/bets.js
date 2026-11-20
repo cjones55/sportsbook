@@ -2,6 +2,7 @@
 const { db, tx, intSetting, getSetting, teaserOdds } = require('./db');
 const odds = require('./odds');
 const props = require('./props');
+const boosts = require('./boosts');
 
 class UserError extends Error {
   constructor(message, status = 400, extra) { super(message); this.status = status; this.extra = extra; }
@@ -130,8 +131,12 @@ async function placeBet(user, body) {
   const dec = type === 'teaser'
     ? americanToDecimal(teaserRow[legs.length])
     : legs.reduce((acc, l) => acc * americanToDecimal(l.price), 1);
+  const boostId = body.boostId ? Number(body.boostId) : null;
+  const boostPct = boostId
+    ? boosts.check(user, boostId, { type, sports: legs.map(l => l.event.sport_key), stakeCents: stake, freeplay }).pct
+    : null;
   // A free play win pays the profit only; the stake is not returned.
-  const payout = Math.floor(stake * dec) - (freeplay ? stake : 0);
+  const payout = boosts.boostedPayout(stake, Math.floor(stake * dec), boostPct) - (freeplay ? stake : 0);
   const maxPayout = intSetting('max_payout_cents');
   if (maxPayout && payout > maxPayout) throw new UserError(`Maximum payout is $${(maxPayout / 100).toFixed(2)}. Lower your stake.`);
 
@@ -140,8 +145,10 @@ async function placeBet(user, body) {
     if (fresh.status !== 'active') throw new UserError('Account is suspended.', 403);
     if (freeplay && fresh.freeplay_cents < stake) throw new UserError('Not enough free play for this bet.');
     if (!freeplay && fresh.balance_cents < stake) throw new UserError('Not enough credit for this bet.');
-    const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents, teaser_points, teaser_odds, freeplay)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout, teaserPts, teaserRow && JSON.stringify(teaserRow), freeplay ? 1 : 0);
+    // Checked again inside the transaction so two quick bets can't both use a single-use boost.
+    if (boostId) boosts.check(user, boostId, { type, sports: legs.map(l => l.event.sport_key), stakeCents: stake, freeplay });
+    const { lastInsertRowid: betId } = db.prepare(`INSERT INTO bets(user_id, type, stake_cents, decimal_odds, potential_payout_cents, teaser_points, teaser_odds, freeplay, boost_id, boost_pct)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, type, stake, dec, payout, teaserPts, teaserRow && JSON.stringify(teaserRow), freeplay ? 1 : 0, boostId, boostPct);
     const ins = db.prepare(`INSERT INTO bet_legs(bet_id, event_id, sport_key, sport_title, home_team, away_team, commence_time, market, selection, point, orig_point, price,
         description, prop_name, prop_id)
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -213,8 +220,15 @@ function evaluate(bet, legs) {
 
 // What a bet pays in credit (payout) and hands back as free play (back).
 // Free play bets: a win pays profit only, a push or void returns the free play.
+// A profit boost raises the profit on a win; extra is how much more that paid.
 function outcome(bet, legs) {
   const r = evaluate(bet, legs);
+  r.extra = 0;
+  if (r.status === 'won' && bet.boost_pct) {
+    const boosted = boosts.boostedPayout(bet.stake_cents, r.payout, bet.boost_pct);
+    r.extra = boosted - r.payout;
+    r.payout = boosted;
+  }
   if (!bet.freeplay) return { ...r, back: 0 };
   if (r.status === 'won') return { status: 'won', payout: Math.max(0, r.payout - bet.stake_cents), back: 0 };
   if (r.status === 'push' || r.status === 'void') return { status: r.status, payout: 0, back: bet.stake_cents };
@@ -227,12 +241,12 @@ function refreshBet(betId, settledBy) {
   return tx(() => {
     const bet = db.prepare('SELECT * FROM bets WHERE id = ?').get(betId);
     const legs = db.prepare('SELECT * FROM bet_legs WHERE bet_id = ?').all(betId);
-    const { status, payout, back } = outcome(bet, legs);
+    const { status, payout, back, extra = 0 } = outcome(bet, legs);
     if (status === bet.status && payout === bet.payout_cents && back === bet.freeplay_back_cents) return;
     const delta = payout - bet.payout_cents;
     const backDelta = back - bet.freeplay_back_cents;
-    db.prepare(`UPDATE bets SET status = ?, payout_cents = ?, freeplay_back_cents = ?, settled_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
-      settled_by = ? WHERE id = ?`).run(status, payout, back, status, status === 'pending' ? null : settledBy, betId);
+    db.prepare(`UPDATE bets SET status = ?, payout_cents = ?, freeplay_back_cents = ?, boost_extra_cents = ?, settled_at = CASE WHEN ? = 'pending' THEN NULL ELSE datetime('now') END,
+      settled_by = ? WHERE id = ?`).run(status, payout, back, extra, status, status === 'pending' ? null : settledBy, betId);
     const type = bet.status === 'pending' ? (status === 'won' ? 'payout' : 'refund') : 'regrade';
     if (delta !== 0) applyTransaction(bet.user_id, delta, type, { betId, note: `Bet #${betId} ${status}` });
     if (backDelta !== 0) applyTransaction(bet.user_id, backDelta, type, { betId, note: `Bet #${betId} ${status}`, wallet: 'freeplay' });

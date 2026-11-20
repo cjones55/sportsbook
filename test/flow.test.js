@@ -739,3 +739,62 @@ test('blackjack: the bookie can take test hands off the books', async () => {
   // The client can deal again (the open hand is gone).
   assert.equal((await p('POST', '/api/blackjack/deal', { bet: 10 })).status, 200);
 });
+
+test('profit boosts: the bookie creates one, a client uses it once, and a win pays the boosted profit', async () => {
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  await admin('PATCH', '/api/admin/settings', { betting_open: '1' });
+  const { body: { user } } = await admin('POST', '/api/admin/users', { username: 'booster', password: 'secret1', credit: '500' });
+  const c = client();
+  await c('POST', '/api/login', { username: 'booster', password: 'secret1' });
+
+  assert.equal((await c('POST', '/api/admin/boosts', { title: 'x', pct: 25 })).status, 403);
+  assert.equal((await admin('POST', '/api/admin/boosts', { title: 'Bad', pct: 0 })).status, 400);
+  const made = await admin('POST', '/api/admin/boosts', { title: 'Straight bet boost', pct: 50, betType: 'single', maxStake: '50', usesPerClient: '1' });
+  assert.equal(made.status, 200);
+  const boostId = made.body.boost.id;
+  const parlayOnly = (await admin('POST', '/api/admin/boosts', { title: 'Parlay boost', pct: 25, betType: 'parlay', minLegs: '3' })).body.boost.id;
+  const other = await admin('POST', '/api/admin/users', { username: 'notyou', password: 'secret1' });
+  const private_ = (await admin('POST', '/api/admin/boosts', { title: 'Just for notyou', pct: 100, userId: other.body.user.id })).body.boost.id;
+
+  const listed = (await c('GET', '/api/boosts')).body.boosts.map(b => b.id);
+  assert.ok(listed.includes(boostId) && listed.includes(parlayOnly));
+  assert.ok(!listed.includes(private_));
+
+  const { events } = (await c('GET', '/api/odds/basketball_nba')).body;
+  const ev = events[0], o = ev.markets.h2h[0];
+  const leg = { eventId: ev.id, sportKey: ev.sport_key, market: 'h2h', selection: o.name, point: null, price: o.price };
+  const place = body => c('POST', '/api/bets', { type: 'single', stake: 40, legs: [leg], ...body });
+
+  assert.equal((await place({ boostId: private_ })).status, 409);
+  assert.equal((await place({ boostId: parlayOnly })).status, 400);
+  assert.equal((await place({ boostId, stake: 60 })).status, 400); // over the boost's max stake
+  assert.equal((await place({ boostId, freeplay: true })).status, 400);
+  const ok = await place({ boostId });
+  assert.equal(ok.status, 200);
+  const raw = Math.floor(4000 * bets.americanToDecimal(o.price));
+  const boosted = 4000 + Math.floor((raw - 4000) * 150 / 100);
+  assert.equal(ok.body.bet.boost_pct, 50);
+  assert.equal(ok.body.bet.potential_payout_cents, boosted);
+  // Single use: the second try is refused and it drops off the client's list.
+  assert.equal((await place({ boostId })).status, 400);
+  assert.ok(!(await c('GET', '/api/boosts')).body.boosts.some(b => b.id === boostId));
+
+  const won = await admin('POST', `/api/admin/legs/${ok.body.bet.legs[0].id}/settle`, { status: 'won' });
+  assert.equal(won.body.bet.payout_cents, boosted);
+  assert.equal(won.body.bet.boost_extra_cents, boosted - raw);
+  assert.equal((await c('GET', '/api/me')).body.user.balanceCents, 50000 - 4000 + boosted);
+  // A push just returns the stake.
+  const push = await admin('POST', `/api/admin/legs/${ok.body.bet.legs[0].id}/settle`, { status: 'push' });
+  assert.equal(push.body.bet.payout_cents, 4000);
+  assert.equal(push.body.bet.boost_extra_cents, 0);
+  await admin('POST', `/api/admin/legs/${ok.body.bet.legs[0].id}/settle`, { status: 'won' });
+
+  const report = (await admin('GET', '/api/admin/boosts')).body.boosts.find(b => b.id === boostId);
+  assert.equal(report.bets, 1);
+  assert.equal(report.extraPaidCents, boosted - raw);
+  assert.equal((await admin('DELETE', `/api/admin/boosts/${boostId}`)).status, 400);
+  assert.equal((await admin('PATCH', `/api/admin/boosts/${parlayOnly}`, { status: 'paused' })).status, 200);
+  assert.ok(!(await c('GET', '/api/boosts')).body.boosts.some(b => b.id === parlayOnly));
+  assert.equal((await admin('DELETE', `/api/admin/boosts/${parlayOnly}`)).status, 200);
+});

@@ -19,6 +19,7 @@ const odds = require(SRC + 'odds');
 const bets = require(SRC + 'bets');
 const props = require(SRC + 'props');
 const blackjack = require(SRC + 'blackjack');
+const boosts = require(SRC + 'boosts');
 const { UserError } = bets;
 
 const PUBLIC = fs.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
@@ -177,6 +178,9 @@ route('POST', '/api/bets', async (req, res, { user, body }) => {
   const u = db.prepare('SELECT balance_cents, freeplay_cents FROM users WHERE id = ?').get(user.id);
   return { bet, balanceCents: u.balance_cents, freeplayCents: u.freeplay_cents };
 });
+
+// Profit boosts this client can still use (admins see none: they can't bet).
+route('GET', '/api/boosts', (req, res, { user }) => ({ boosts: user.role === 'client' ? boosts.forClient(user) : [] }));
 
 route('GET', '/api/bets', (req, res, { user, query }) => ({
   bets: bets.listBets({ userId: user.id, status: query.get('status') || undefined, limit: 200 }),
@@ -365,6 +369,12 @@ route('DELETE', '/api/admin/props/:id', { auth: 'admin' }, (req, res, { params }
   db.prepare('DELETE FROM custom_props WHERE id = ?').run(params.id);
   return { ok: true };
 });
+
+// Profit boosts.
+route('GET', '/api/admin/boosts', { auth: 'admin' }, () => ({ boosts: boosts.adminList() }));
+route('POST', '/api/admin/boosts', { auth: 'admin' }, (req, res, { body }) => ({ boost: boosts.create(body) }));
+route('PATCH', '/api/admin/boosts/:id', { auth: 'admin' }, (req, res, { params, body }) => { boosts.setStatus(Number(params.id), body.status); return { ok: true }; });
+route('DELETE', '/api/admin/boosts/:id', { auth: 'admin' }, (req, res, { params }) => { boosts.remove(Number(params.id)); return { ok: true }; });
 
 route('POST', '/api/admin/grade', { auth: 'admin' }, async () => bets.autoGrade({ force: true }));
 
