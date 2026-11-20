@@ -21,7 +21,7 @@ The first start creates the admin account from `ADMIN_USERNAME` / `ADMIN_PASSWOR
 **Clients**: odds board by sport (spread, moneyline, total), bet slip with straight bets,
 parlays or teasers (6, 6.5 or 7 points on football and basketball spreads and totals, 2 to 6 legs), props (a game's Props button, plus a Specials tab for the bookie's stand-alone props), open and settled bets, credit history, password change. Works on phones.
 
-**Blackjack**: clients play blackjack against the house with their credit (6 decks shuffled every hand, dealer stands on soft 17, blackjack pays 3 to 2, double on any two cards, split up to 4 hands). Cards are dealt on the server and the dealer's hole card stays hidden until the hand ends. The admin sees every hand under Bets > Blackjack and on each client's page, blackjack profit counts toward book profit, and Settings has an on/off switch and min/max bet (default $1 to $100). An unfinished hand can be voided for a refund.
+**Blackjack**: clients play blackjack against the house with their credit (6 decks shuffled every hand, dealer stands on soft 17, blackjack pays 3 to 2, double on any two cards, split up to 4 hands). Cards are dealt on the server and the dealer's hole card stays hidden until the hand ends. The admin sees every hand under Bets > Blackjack and on each client's page, blackjack profit counts toward book profit, and Settings has an on/off switch and min/max bet (default $1 to $1,000). An unfinished hand can be voided for a refund.
 
 **Admin**
 - Dashboard: book profit, open action, max liability, share link.
