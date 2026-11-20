@@ -31,6 +31,14 @@
   const betName = b => b.type === 'parlay' ? `${b.legs.length}-leg parlay` : b.type === 'teaser' ? `${b.legs.length}-leg teaser, ${b.teaser_points} pts` : 'Straight';
 
   const isPropLeg = l => !MARKET[l.market];
+
+  // Profit boosts: a win's profit goes up by pct; the stake is never boosted.
+  const boostedCents = (stakeCents, payoutCents, pct) => (!pct || payoutCents <= stakeCents ? payoutCents : stakeCents + Math.floor((payoutCents - stakeCents) * (100 + pct) / 100));
+  const boostedDec = (d, pct) => 1 + (d - 1) * (100 + (pct || 0)) / 100;
+  const boostFits = (b, type, legs) => type !== 'teaser' && (b.betType === 'any' || b.betType === type) && legs.length >= b.minLegs
+    && (!b.sportKey || legs.every(l => (l.sportKey || l.sport_key) === b.sportKey));
+  const boostRules = b => [b.betType === 'single' ? 'straight bets' : b.betType === 'parlay' ? `parlays${b.minLegs > 1 ? ` of ${b.minLegs}+ picks` : ''}` : `any straight bet or parlay${b.minLegs > 1 ? ` (parlays ${b.minLegs}+ picks)` : ''}`,
+    b.maxStakeCents ? `max stake ${money(b.maxStakeCents)}` : '', b.expiresAt ? `ends ${when(b.expiresAt)}` : ''].filter(Boolean).join(' · ');
   const evName = (away, home, title) => (away && home ? `${away} @ ${home}` : title || 'Special');
   const ouShort = o => o.market === 'player_tds_over' ? `${Math.ceil(Number(o.point))}+ TDs` : (o.name === 'Over' ? 'O' : o.name === 'Under' ? 'U' : o.name) + (o.point != null ? ' ' + o.point : '');
 
@@ -84,7 +92,7 @@
   const state = {
     me: null, book: null, sports: [], sport: null, events: [], eventsInfo: null,
     slip: loadSlip(), slipMode: 'single', teaserPts: '6', slipOpen: false, placing: false,
-    props: {}, propsOpen: new Set(), propTab: {}, specials: [],
+    props: {}, propsOpen: new Set(), propTab: {}, specials: [], boosts: [], parlayBoost: '',
   };
   function loadSlip() { try { return JSON.parse(localStorage.getItem('slip') || '[]'); } catch { return []; } }
   function saveSlip() { try { localStorage.setItem('slip', JSON.stringify(state.slip)); } catch { /* ignore */ } }
@@ -96,7 +104,7 @@
     const r = route();
     const isAdmin = state.me.role === 'admin';
     const links = isAdmin
-      ? [['admin', 'Dashboard'], ['admin/clients', 'Clients'], ['admin/bets', 'Bets'], ['admin/props', 'Props'], ['admin/risk', 'Risk'], ['admin/ledger', 'Ledger'], ['admin/settings', 'Settings'], ['odds', 'Odds board'], ['account', 'Account']]
+      ? [['admin', 'Dashboard'], ['admin/clients', 'Clients'], ['admin/bets', 'Bets'], ['admin/props', 'Props'], ['admin/boosts', 'Boosts'], ['admin/risk', 'Risk'], ['admin/ledger', 'Ledger'], ['admin/settings', 'Settings'], ['odds', 'Odds board'], ['account', 'Account']]
       : [['', 'Odds'], ['bets', 'My bets'], ...(state.book.blackjackEnabled ? [['blackjack', 'Blackjack']] : []), ['account', 'Account']];
     const active = links.map(l => l[0]).filter(k => r === k || (k && r.startsWith(k + '/'))).sort((a, b) => b.length - a.length)[0] ?? '';
     app.innerHTML = `
@@ -173,7 +181,7 @@
   // ---------- odds board ----------
   async function renderBoard() {
     const readOnly = state.me.role === 'admin';
-    const view = shell(`<div class="layout"><div><div class="sports" id="sports"></div><div id="games"><div class="empty">Loading…</div></div></div>
+    const view = shell(`<div class="layout"><div>${readOnly ? '' : '<div id="boosts"></div>'}<div class="sports" id="sports"></div><div id="games"><div class="empty">Loading…</div></div></div>
       ${readOnly ? '<div></div>' : `<aside class="slip" id="slip"></aside>`}</div>
       ${readOnly ? '' : `<button class="btn primary slip-fab" id="slipFab"></button>`}`);
     if (!state.sports.length) {
@@ -181,7 +189,7 @@
     }
     if (!state.sport || !state.sports.find(s => s.key === state.sport)) state.sport = state.sports[0] && state.sports[0].key;
     drawSports();
-    if (!readOnly) drawSlip();
+    if (!readOnly) { drawSlip(); loadBoosts(); }
     await loadGames();
 
     function drawSports() {
@@ -190,6 +198,17 @@
         : '<span class="muted">No sports are open for betting right now.</span>';
       $$('[data-sport]', view).forEach(b => b.onclick = () => { state.sport = b.dataset.sport; drawSports(); loadGames(); });
     }
+  }
+
+  async function loadBoosts() {
+    try { state.boosts = (await api('GET', '/api/boosts')).boosts; } catch { state.boosts = []; }
+    const box = $('#boosts');
+    if (box) {
+      box.innerHTML = state.boosts.length ? `<div class="boosts">${state.boosts.map(b => `<div class="boost-card"><b>+${b.pct}% profit boost</b><span>${esc(b.title)}</span>
+        <small>${esc(boostRules(b))}${b.sportKey ? ` · ${esc((state.sports.find(x => x.key === b.sportKey) || {}).title || b.sportKey)} only` : ''}${b.usesPerClient > 1 ? ` · ${b.usesLeft} use${b.usesLeft === 1 ? '' : 's'} left` : ''}</small></div>`).join('')}</div>
+        <p class="muted small" style="margin:-4px 0 12px">Add picks, then choose the boost on your bet slip. A boost raises your winnings, not your stake.</p>` : '';
+    }
+    drawSlip();
   }
 
   async function loadGames() {
@@ -379,10 +398,20 @@
     const fpAvail = state.me.freeplayCents > 0;
     if (!fpAvail) state.useFreeplay = false;
     const fp = state.useFreeplay;
+    // Boosts that fit each bet on the slip (none with free play or on teasers).
+    const myBoosts = fp ? [] : (state.boosts || []);
+    const pctOf = id => (myBoosts.find(b => b.id === Number(id)) || {}).pct || 0;
+    const fits = (type, legs) => myBoosts.filter(b => boostFits(b, type, legs));
+    for (const l of s) if (l.boostId && !fits('single', [l]).some(b => b.id === Number(l.boostId))) l.boostId = '';
+    if (state.parlayBoost && !fits(mode, s).some(b => b.id === Number(state.parlayBoost))) state.parlayBoost = '';
+    const boostSelect = (attr, list, chosen) => list.length ? `<select class="boost-pick" ${attr}><option value="">No profit boost</option>${list.map(b =>
+      `<option value="${b.id}" ${Number(chosen) === b.id ? 'selected' : ''}>+${b.pct}% boost: ${esc(b.title)}${b.maxStakeCents ? ` (max ${money(b.maxStakeCents)})` : ''}</option>`).join('')}</select>` : '';
+    // Payout in cents (stake included) for a stake in dollars.
+    const payCents = (st, d, boostId) => boostedCents(Math.round(st * 100), Math.floor(st * d * 100), pctOf(boostId));
     let totalStake = 0, totalWin = 0;
     const legsHtml = s.map((l, i) => {
       const st = parseFloat(l.stake) || 0;
-      if (mode === 'single') { totalStake += st; totalWin += st * dec(l.price); }
+      if (mode === 'single') { totalStake += st; totalWin += payCents(st, dec(l.price), l.boostId); }
       const sel = mode === 'teaser'
         ? `${esc(legLabel(tease(l, Number(state.teaserPts))))} <span class="muted small">from ${esc(legLabel(l).replace(l.selection + ' ', ''))}</span>`
         : `${esc(legLabel(l))} <span class="num">${odds(l.price)}</span>`;
@@ -391,15 +420,16 @@
         <div class="sel">${sel}</div>
         <div class="ev">${esc(evName(l.away, l.home, l.sportTitle))} · ${esc(MARKET[l.market] || 'Prop')}</div>
         ${l.changed ? `<div class="small" style="color:var(--warn)">Odds changed</div>` : ''}
-        ${mode === 'single' ? `<input type="number" inputmode="decimal" min="0" step="0.01" placeholder="Stake $" data-stake="${i}" value="${esc(l.stake)}">
-          <div class="small muted" data-win="${i}">${st ? 'To win ' + money(Math.floor(st * (dec(l.price) - 1) * 100)) : ''}</div>` : ''}
+        ${mode === 'single' ? `${boostSelect(`data-lboost="${i}"`, fits('single', [l]), l.boostId)}<input type="number" inputmode="decimal" min="0" step="0.01" placeholder="Stake $" data-stake="${i}" value="${esc(l.stake)}">
+          <div class="small muted" data-win="${i}">${st ? 'To win ' + money(payCents(st, dec(l.price), l.boostId) - Math.round(st * 100)) : ''}</div>` : ''}
       </div>`;
     }).join('');
     let parlayDec = mode === 'teaser' ? dec(teaserRow[s.length]) : s.reduce((a, l) => a * dec(l.price), 1);
     if (mode === 'parlay' || mode === 'teaser') {
       const st = parseFloat(state.parlayStake) || 0;
-      totalStake = st; totalWin = st * parlayDec;
+      totalStake = st; totalWin = payCents(st, parlayDec, mode === 'parlay' ? state.parlayBoost : '');
     }
+    const pBoost = mode === 'parlay' ? pctOf(state.parlayBoost) : 0;
     el.innerHTML = `<div class="panel">
       <div class="row between" style="margin-bottom:10px"><h3 style="margin:0">Bet slip</h3>
         <div class="row" style="gap:6px"><button class="btn sm" id="slipClear">Clear</button><button class="btn sm slip-close" id="slipClose">Hide</button></div></div>
@@ -409,11 +439,12 @@
       ${parlayWhy && mode === 'single' ? `<p class="small muted" style="margin:-4px 0 10px">Parlay is off: ${esc(parlayWhy)}</p>` : ''}
       ${mode === 'teaser' ? `<div class="tabs">${['6', '6.5', '7'].map(p => `<button data-teaserpts="${p}" class="${state.teaserPts === p ? 'on' : ''}">${p} pts</button>`).join('')}</div>` : ''}
       ${legsHtml}
-      ${mode === 'parlay' || mode === 'teaser' ? `<div class="slip-total"><span>${s.length}-leg ${mode}</span><b class="num">${decToAm(parlayDec)}</b></div>
+      ${mode === 'parlay' || mode === 'teaser' ? `<div class="slip-total"><span>${s.length}-leg ${mode}</span><b class="num">${pBoost ? `<s class="muted">${decToAm(parlayDec)}</s> <span class="pos">${decToAm(boostedDec(parlayDec, pBoost))}</span>` : decToAm(parlayDec)}</b></div>
+        ${mode === 'parlay' ? boostSelect('id="parlayBoost"', fits('parlay', s), state.parlayBoost) : ''}
         <input type="number" inputmode="decimal" min="0" step="0.01" placeholder="Stake $" id="parlayStake" value="${esc(state.parlayStake || '')}">` : ''}
       ${fpAvail ? `<label class="check"><input type="checkbox" id="useFp" ${fp ? 'checked' : ''}> Bet with free play (${money(state.me.freeplayCents)}). Wins pay profit only.</label>` : ''}
       <div class="slip-total"><span class="muted">Total stake</span><b id="slipStake">${money(Math.round(totalStake * 100))}</b></div>
-      <div class="slip-total"><span class="muted">Total payout</span><b id="slipWin" class="pos">${money(Math.floor(totalWin * 100) - (fp ? Math.round(totalStake * 100) : 0))}</b></div>
+      <div class="slip-total"><span class="muted">Total payout</span><b id="slipWin" class="pos">${money(totalWin - (fp ? Math.round(totalStake * 100) : 0))}</b></div>
       <div class="error" id="slipErr"></div>
       <button class="btn primary" style="width:100%;padding:11px" id="placeBtn" ${state.placing ? 'disabled' : ''}>${state.placing ? 'Placing…' : 'Place bet' + (mode === 'single' && s.length > 1 ? 's' : '')}</button>
       <p class="muted small" style="margin:8px 0 0">Min ${money(state.book.minBetCents)} · Max ${money(state.me.maxBetCents ?? state.book.maxBetCents)} per bet</p>
@@ -430,19 +461,22 @@
       l.stake = inp.value;
       saveSlip();
       const st = parseFloat(inp.value) || 0;
-      $(`[data-win="${inp.dataset.stake}"]`, el).textContent = st ? 'To win ' + money(Math.floor(st * (dec(l.price) - 1) * 100)) : '';
+      $(`[data-win="${inp.dataset.stake}"]`, el).textContent = st ? 'To win ' + money(payCents(st, dec(l.price), l.boostId) - Math.round(st * 100)) : '';
       updateTotals();
     });
+    $$('[data-lboost]', el).forEach(sel => sel.onchange = () => { state.slip[+sel.dataset.lboost].boostId = sel.value; saveSlip(); drawSlip(); });
+    const pb = $('#parlayBoost', el);
+    if (pb) pb.onchange = () => { state.parlayBoost = pb.value; drawSlip(); };
     const ps = $('#parlayStake', el);
     if (ps) ps.oninput = () => { state.parlayStake = ps.value; updateTotals(); };
     $('#placeBtn', el).onclick = placeBets;
 
     function updateTotals() {
       let ts = 0, tw = 0;
-      if (state.slipMode !== 'single') { ts = parseFloat(state.parlayStake) || 0; tw = ts * parlayDec; }
-      else for (const l of state.slip) { const st = parseFloat(l.stake) || 0; ts += st; tw += st * dec(l.price); }
+      if (state.slipMode !== 'single') { ts = parseFloat(state.parlayStake) || 0; tw = payCents(ts, parlayDec, state.slipMode === 'parlay' ? state.parlayBoost : ''); }
+      else for (const l of state.slip) { const st = parseFloat(l.stake) || 0; ts += st; tw += payCents(st, dec(l.price), l.boostId); }
       $('#slipStake', el).textContent = money(Math.round(ts * 100));
-      $('#slipWin', el).textContent = money(Math.floor(tw * 100) - (state.useFreeplay ? Math.round(ts * 100) : 0));
+      $('#slipWin', el).textContent = money(tw - (state.useFreeplay ? Math.round(ts * 100) : 0));
     }
   }
 
@@ -462,8 +496,8 @@
     err.textContent = '';
     const legOf = l => ({ eventId: l.eventId, sportKey: l.sportKey, market: l.market, selection: l.selection, point: l.point, price: l.price, description: l.description ?? null, propId: l.propId ?? null });
     const jobs = state.slipMode !== 'single'
-      ? [{ type: state.slipMode, stake: state.parlayStake, legs: state.slip.map(legOf), keys: state.slip.map(l => l.key), teaserPoints: Number(state.teaserPts) }]
-      : state.slip.map(l => ({ type: 'single', stake: l.stake, legs: [legOf(l)], keys: [l.key] }));
+      ? [{ type: state.slipMode, stake: state.parlayStake, legs: state.slip.map(legOf), keys: state.slip.map(l => l.key), teaserPoints: Number(state.teaserPts), boostId: state.slipMode === 'parlay' ? state.parlayBoost : '' }]
+      : state.slip.map(l => ({ type: 'single', stake: l.stake, legs: [legOf(l)], keys: [l.key], boostId: l.boostId }));
     if (jobs.some(j => !(parseFloat(j.stake) > 0))) { err.textContent = 'Enter a stake for every bet.'; return; }
     state.placing = true;
     drawSlip();
@@ -471,7 +505,7 @@
     const errors = [];
     for (const j of jobs) {
       try {
-        const r = await api('POST', '/api/bets', { type: j.type, stake: j.stake, legs: j.legs, teaserPoints: j.teaserPoints, freeplay: !!state.useFreeplay });
+        const r = await api('POST', '/api/bets', { type: j.type, stake: j.stake, legs: j.legs, teaserPoints: j.teaserPoints, freeplay: !!state.useFreeplay, boostId: state.useFreeplay ? null : (Number(j.boostId) || null) });
         setBalance(r.balanceCents, r.freeplayCents);
         state.slip = state.slip.filter(s => !j.keys.includes(s.key));
         placed++;
@@ -481,10 +515,10 @@
       }
     }
     state.placing = false;
-    if (!state.slip.length) { state.parlayStake = ''; state.slipOpen = false; }
+    if (!state.slip.length) { state.parlayStake = ''; state.parlayBoost = ''; state.slipOpen = false; }
     saveSlip();
     drawGames();
-    drawSlip();
+    if (placed) loadBoosts(); else drawSlip();
     if (placed) toast(`${placed} bet${placed > 1 ? 's' : ''} placed.`);
     if (errors.length) { const e2 = $('#slipErr'); if (e2) e2.textContent = [...new Set(errors)].join(' '); }
   }
@@ -502,10 +536,10 @@
       </div></div>`).join('');
     const result = b.status === 'pending' ? `To pay <b>${money(b.potential_payout_cents)}</b>` : `Paid <b>${money(b.payout_cents)}</b>`;
     return `<div class="bet">
-      <div class="bet-head"><div><b>${esc(betName(b))}</b>${b.freeplay ? ' <span class="pill">free play</span>' : ''} <span class="muted small">#${b.id}${admin ? ` · <a href="#/admin/clients/${b.user_id}">${esc(b.username)}</a>` : ''} · ${esc(sqlTime(b.created_at))}</span></div>
+      <div class="bet-head"><div><b>${esc(betName(b))}</b>${b.freeplay ? ' <span class="pill">free play</span>' : ''}${b.boost_pct ? ` <span class="pill boost">+${b.boost_pct}% boost</span>` : ''} <span class="muted small">#${b.id}${admin ? ` · <a href="#/admin/clients/${b.user_id}">${esc(b.username)}</a>` : ''} · ${esc(sqlTime(b.created_at))}</span></div>
         <span class="pill ${b.status}">${b.status}</span></div>
       ${legs}
-      <div class="bet-foot"><span>Stake <b>${money(b.stake_cents)}</b></span><span>Odds <b>${decToAm(b.decimal_odds)}</b></span><span>${result}</span>
+      <div class="bet-foot"><span>Stake <b>${money(b.stake_cents)}</b></span><span>Odds <b>${b.boost_pct ? `<s class="muted">${decToAm(b.decimal_odds)}</s> ${decToAm(boostedDec(b.decimal_odds, b.boost_pct))}` : decToAm(b.decimal_odds)}</b></span><span>${result}</span>
         ${admin && b.settled_by ? `<span>Settled by ${esc(b.settled_by)}</span>` : ''}
         ${admin && b.status === 'pending' ? `<button class="btn sm danger" data-voidbet="${b.id}">Void bet</button>` : ''}</div>
     </div>`;
@@ -952,6 +986,68 @@
     });
   }
 
+  async function renderAdminBoosts() {
+    const view = shell(`<div class="row between"><h1>Profit boosts</h1><button class="btn primary" id="newBoost">New boost</button></div>
+      <p class="muted small">A profit boost raises what a winning bet pays in profit by a percentage (the stake is never boosted). Example: a 25% boost on a $100 bet at +200 pays $250 profit instead of $200. Clients see live boosts at the top of the board and choose one on their bet slip. Boosts can't be used on teasers or with free play.</p>
+      <div id="list"><div class="empty">Loading…</div></div>`);
+    $('#newBoost', view).onclick = () => newBoostModal(renderAdminBoosts);
+    const { boosts } = await api('GET', '/api/admin/boosts');
+    const list = $('#list', view);
+    if (!boosts.length) { list.innerHTML = '<div class="empty">No profit boosts yet.</div>'; return; }
+    const sportName = k => (state.sports.find(x => x.key === k) || {}).title || k;
+    list.innerHTML = boosts.map(b => {
+      const status = b.live ? 'live' : b.status === 'paused' ? 'paused' : 'ended';
+      return `<div class="bet">
+        <div class="bet-head"><div><b>+${b.pct}% · ${esc(b.title)}</b>
+          <div class="small muted">${esc(boostRules(b))}${b.sportKey ? ` · ${esc(sportName(b.sportKey))} only` : ''} · ${b.usesPerClient} use${b.usesPerClient === 1 ? '' : 's'} per client${b.username ? ` · only for <a href="#/admin/clients/${b.userId}">${esc(b.username)}</a>` : ' · all clients'}</div></div>
+          <span class="pill ${status === 'live' ? 'won' : status === 'paused' ? 'push' : ''}">${status}</span></div>
+        <div class="bet-foot"><span>${b.bets} bet${b.bets === 1 ? '' : 's'} · ${money(b.stakeCents)} staked</span><span>Extra paid out <b>${money(b.extraPaidCents)}</b></span>
+          ${b.status === 'active' ? `<button class="btn sm" data-bstatus="${b.id}|paused">Pause</button>` : `<button class="btn sm" data-bstatus="${b.id}|active">Turn back on</button>`}
+          ${b.bets ? '' : `<button class="btn sm danger" data-bdel="${b.id}">Delete</button>`}</div></div>`;
+    }).join('');
+    const act = async (fn, msg) => { try { await fn(); toast(msg); renderAdminBoosts(); } catch (e) { toast(e.message, true); } };
+    $$('[data-bstatus]', list).forEach(b => b.onclick = () => {
+      const [id, status] = b.dataset.bstatus.split('|');
+      act(() => api('PATCH', `/api/admin/boosts/${id}`, { status }), status === 'active' ? 'Boost is on.' : 'Boost paused. Bets already placed keep it.');
+    });
+    $$('[data-bdel]', list).forEach(b => b.onclick = () => {
+      if (!confirm('Delete this boost?')) return;
+      act(() => api('DELETE', `/api/admin/boosts/${b.dataset.bdel}`), 'Boost deleted.');
+    });
+  }
+
+  function newBoostModal(done) {
+    modal(`<div class="modal-head"><h2>New profit boost</h2><button class="btn sm" data-close>Close</button></div>
+      <form id="nb">
+        <label class="field"><span>Name (shown to clients)</span><input type="text" name="title" placeholder="e.g. Sunday parlay boost" required></label>
+        <div class="grid2">
+          <label class="field"><span>Boost on profit (%)</span><input type="number" name="pct" min="1" max="500" step="1" value="25" required></label>
+          <label class="field"><span>Bet type</span><select name="betType"><option value="any">Straight bets and parlays</option><option value="single">Straight bets only</option><option value="parlay">Parlays only</option></select></label>
+          <label class="field"><span>Parlay needs at least (picks)</span><input type="number" name="minLegs" min="1" max="20" value="1"></label>
+          <label class="field"><span>Sport</span><select name="sportKey"><option value="">Any sport</option></select></label>
+          <label class="field"><span>Max stake ($, blank for none)</span><input type="number" name="maxStake" min="1" step="0.01" placeholder="e.g. 50"></label>
+          <label class="field"><span>Uses per client</span><input type="number" name="usesPerClient" min="1" max="1000" value="1"></label>
+          <label class="field"><span>Ends (blank for no end)</span><input type="datetime-local" name="expiresAt"></label>
+          <label class="field"><span>Who can use it</span><select name="userId"><option value="">All clients</option></select></label>
+        </div>
+        <div class="error" id="nbErr"></div><button class="btn primary">Create boost</button>
+      </form>`, async (root, close) => {
+      try {
+        if (!state.sports.length) state.sports = (await api('GET', '/api/sports')).sports;
+        $('[name=sportKey]', root).insertAdjacentHTML('beforeend', state.sports.map(x => `<option value="${esc(x.key)}">${esc(x.title)}</option>`).join(''));
+        const { users } = await api('GET', '/api/admin/users');
+        $('[name=userId]', root).insertAdjacentHTML('beforeend', users.filter(u => u.role === 'client').map(u => `<option value="${u.id}">${esc(u.username)}</option>`).join(''));
+      } catch (e) { toast(e.message, true); }
+      $('#nb', root).onsubmit = async e => {
+        e.preventDefault();
+        const body = formData(e.target);
+        body.expiresAt = body.expiresAt ? new Date(body.expiresAt).toISOString() : '';
+        try { await api('POST', '/api/admin/boosts', body); close(); toast('Boost created. Clients can use it now.'); done(); }
+        catch (err) { $('#nbErr', root).textContent = err.message; }
+      };
+    });
+  }
+
   async function renderRisk() {
     const view = shell('<h1>Risk</h1><p class="muted small">Open action by game and side. Straight-bet payout is what you pay if that side wins; parlays and teasers are counted in stake only.</p><div class="panel"><div class="table-wrap" id="r">Loading…</div></div>');
     const { exposure } = await api('GET', '/api/admin/exposure');
@@ -1072,6 +1168,7 @@
         if (r.startsWith('admin/clients/')) return await renderClient(r.split('/')[2]);
         if (r === 'admin/bets') return await renderAdminBets();
         if (r === 'admin/props') return await renderAdminProps();
+        if (r === 'admin/boosts') return await renderAdminBoosts();
         if (r === 'admin/risk') return await renderRisk();
         if (r === 'admin/ledger') return await renderLedger();
         if (r === 'admin/settings') return await renderSettings();

@@ -48,6 +48,13 @@ requests quickly; the $30 plan (20,000 a month) suits a small book. Alternate li
 same-game parlays (several picks from one game; switch off in Settings), but not in teasers. A parlay with a prop in it
 waits for the bookie to grade that pick. Without a key, demo props are shown.
 
+**Profit boosts**: under Admin > Boosts the bookie creates boosts that raise a winning bet's profit
+by a percentage (the stake is never boosted). Each boost can be limited to straight bets or parlays
+(with a minimum number of picks), one sport, a max stake, a number of uses per client, an end time,
+and everyone or one client. Clients see live boosts at the top of the board and pick one on the bet
+slip. Boosts don't apply to teasers or free play. The Boosts page shows each boost's bets and how
+much extra it has paid out.
+
 **Grading**: every 15 minutes the server pulls final scores for games with open bets and
 grades them. Tennis, props (the feed has no player stats) and anything else the scores feed
 doesn't cover gets graded by hand in Admin > Bets (the "Props to grade" tab lists open props).
