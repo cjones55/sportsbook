@@ -172,7 +172,7 @@ const DEFAULT_SETTINGS = {
   props_ttl_minutes: '60',
   blackjack_enabled: '1',
   blackjack_min_cents: '100',
-  blackjack_max_cents: '10000',
+  blackjack_max_cents: '100000',
   // American odds a teaser pays, by teaser size and number of winning legs.
   teaser_odds: JSON.stringify({
     6: { 2: -110, 3: 180, 4: 300, 5: 450, 6: 600 },
