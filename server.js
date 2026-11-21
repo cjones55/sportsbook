@@ -162,7 +162,7 @@ route('GET', '/api/odds/:sport', async (req, res, { params }) => {
   if (params.sport === 'specials') return { fetchedAt: Date.now(), source: 'custom', events: [], specials: props.openCustom(null) };
   const r = await odds.getEvents(params.sport);
   const custom = props.eventsWithCustom();
-  const feed = props.feedPropsOn(params.sport);
+  const feed = props.feedPropsOn(params.sport) || props.houseAltOn(params.sport);
   const events = r.events.filter(e => Date.parse(e.commence_time) > Date.now())
     .sort((a, b) => a.commence_time.localeCompare(b.commence_time))
     .map(e => ({ ...e, hasProps: feed || custom.has(e.id) }));
@@ -385,7 +385,7 @@ route('GET', '/api/admin/transactions', { auth: 'admin' }, (req, res, { query })
 
 const EDITABLE = ['book_name', 'betting_open', 'signup_enabled', 'signup_code', 'signup_starting_credit_cents',
   'min_bet_cents', 'max_bet_cents', 'max_payout_cents', 'max_parlay_legs', 'odds_api_key', 'odds_ttl_minutes',
-  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds', 'props_enabled', 'props_ttl_minutes', 'same_game_parlays',
+  'odds_quota_floor', 'bookmakers', 'enabled_sports', 'auto_grade', 'teaser_odds', 'props_enabled', 'house_alt_lines', 'props_ttl_minutes', 'same_game_parlays',
   'blackjack_enabled', 'blackjack_min_cents', 'blackjack_max_cents'];
 
 // Accepts {"6": {"2": -110, "3": 180, ...}, "6.5": {...}, "7": {...}}.

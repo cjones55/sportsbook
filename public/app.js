@@ -1123,7 +1123,8 @@
           <label class="field"><span>Stop refreshing when fewer requests than this remain</span><input type="number" min="0" name="odds_quota_floor" value="${esc(s.odds_quota_floor)}"></label>
         </div>
         <label class="field"><span>Sportsbooks to copy lines from, in order of preference</span><input type="text" name="bookmakers" value="${esc(s.bookmakers)}"></label>
-        <label class="check"><input type="checkbox" name="props_enabled" ${s.props_enabled === '1' ? 'checked' : ''}> Offer player props and alternate lines from the feed (props: NFL, college football, NBA, MLB, NHL; alt spreads and totals: NFL, college football, NBA, college basketball)</label>
+        <label class="check"><input type="checkbox" name="props_enabled" ${s.props_enabled === '1' ? 'checked' : ''}> Offer player props and alternate lines from the feed (props: NFL, college football, NBA, MLB, NHL; alt spreads and totals: NFL, NBA, college basketball)</label>
+        <label class="check"><input type="checkbox" name="house_alt_lines" ${s.house_alt_lines !== '0' ? 'checked' : ''}> Offer college football alt spreads and totals priced by the site from the main line (uses no requests; they follow the main line as it moves and are graded from the final score)</label>
         <label class="field"><span>Refresh a game's props every (minutes)</span><input type="number" min="1" name="props_ttl_minutes" value="${esc(s.props_ttl_minutes)}"></label>
         <p class="small muted" style="margin-top:0">Props load only when someone opens a game's props, and each load uses about 2 to 10 requests (one per prop market). The free plan's 500 a month runs out quickly; the $30 plan (20,000 a month) is plenty for a small book. Your own props under <a href="#/admin/props">Props</a> use no requests.</p>
         <button type="button" class="btn" id="refresh">Refresh odds now</button>

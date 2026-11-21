@@ -585,6 +585,55 @@ test('alternate spreads and totals: priced per game, auto-graded, parlay rules',
   assert.notEqual(after.status, 'pending');
 });
 
+test('college football alt lines are priced in house from the main line, even with feed props off', async () => {
+  const props = require('../src/props');
+  const { setSetting } = require('../src/db');
+  const joe = client();
+  await joe('POST', '/api/login', { username: 'joe', password: 'secret1' });
+  const joeRow = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  bets.applyTransaction(joeRow.id, 50000, 'deposit');
+  setSetting('props_enabled', '0');
+  try {
+    const ev = (await joe('GET', '/api/odds/americanfootball_ncaaf')).body.events.at(-1);
+    assert.ok(ev.hasProps);
+    const mk = (await joe('GET', `/api/props/${ev.sport_key}/${ev.id}`)).body.markets;
+    assert.deepEqual(mk.map(m => m.key), ['alternate_spreads', 'alternate_totals']);
+    const as = mk[0], at = mk[1];
+    assert.ok(as.outcomes.length >= 20 && at.outcomes.length >= 20);
+    // The main line itself is not repeated, and buying points costs more the more you buy.
+    const main = ev.markets.spreads.find(o => o.name === ev.home_team);
+    const home = as.outcomes.filter(o => o.name === ev.home_team).sort((a, b) => a.point - b.point);
+    assert.ok(!home.some(o => o.point === main.point));
+    for (let i = 1; i < home.length; i++) assert.ok(bets.americanToDecimal(home[i].price) <= bets.americanToDecimal(home[i - 1].price));
+    // Both sides of every line carry vig.
+    const implied = a => (a < 0 ? -a / (-a + 100) : 100 / (a + 100));
+    for (const o of home) {
+      const other = as.outcomes.find(x => x.name === ev.away_team && x.point === -o.point);
+      assert.ok(implied(o.price) + implied(other.price) > 1.03, `${o.point}`);
+    }
+    const overs = at.outcomes.filter(o => o.name === 'Over').sort((a, b) => a.point - b.point);
+    for (let i = 1; i < overs.length; i++) assert.ok(bets.americanToDecimal(overs[i].price) >= bets.americanToDecimal(overs[i - 1].price));
+
+    // Bets at the shown price go through; a stale price is sent back with the current one.
+    const leg = { eventId: ev.id, sportKey: ev.sport_key, market: 'alternate_spreads', selection: home[0].name, point: home[0].point, price: home[0].price, description: null };
+    const stale = await joe('POST', '/api/bets', { type: 'single', stake: 5, legs: [{ ...leg, price: leg.price + 40 }] });
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.changed[0].price, home[0].price);
+    const placed = await joe('POST', '/api/bets', { type: 'parlay', stake: 5, legs: [leg, { ...leg, market: 'alternate_totals', selection: 'Over', point: overs[0].point, price: overs[0].price }] });
+    assert.equal(placed.status, 200, JSON.stringify(placed.body));
+    assert.equal(placed.body.bet.legs[0].prop_name, 'Alt Spreads');
+
+    // The bookie can turn them off.
+    setSetting('house_alt_lines', '0');
+    assert.ok(!props.houseAltOn('americanfootball_ncaaf'));
+    assert.equal((await joe('GET', `/api/props/${ev.sport_key}/${ev.id}`)).body.markets.length, 0);
+    assert.equal((await joe('POST', '/api/bets', { type: 'single', stake: 5, legs: [leg] })).status, 409);
+  } finally {
+    setSetting('props_enabled', '1');
+    setSetting('house_alt_lines', '1');
+  }
+});
+
 test('weeks start Monday midnight in the book time zone', () => {
   const ws = d => bets.weekStart(new Date(d), 'America/New_York').toISOString();
   assert.equal(ws('2026-11-19T16:00:00Z'), '2026-11-16T05:00:00.000Z'); // Thursday
