@@ -188,6 +188,7 @@ const DEFAULT_SETTINGS = {
   enabled_sports: '',
   auto_grade: '1',
   props_enabled: '1',
+  house_alt_lines: '1',
   props_ttl_minutes: '180',
   blackjack_enabled: '1',
   blackjack_min_cents: '100',

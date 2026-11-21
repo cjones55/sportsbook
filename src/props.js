@@ -20,7 +20,8 @@ const isFeedMarket = market => !MAIN_MARKETS.includes(market);
 // Markets asked for per league. Each market the feed returns costs one request.
 const PROP_MARKETS = {
   americanfootball_nfl: [...ALT_MARKETS, 'player_pass_yds', 'player_pass_tds', 'player_rush_yds', 'player_reception_yds', 'player_receptions', 'player_anytime_td', 'player_1st_td', 'player_tds_over', 'team_totals'],
-  americanfootball_ncaaf: [...ALT_MARKETS, 'player_pass_yds', 'player_rush_yds', 'player_reception_yds', 'player_anytime_td', 'player_1st_td', 'player_tds_over', 'team_totals'],
+  // College football alt lines are priced in house (below), so they cost no requests.
+  americanfootball_ncaaf: ['player_pass_yds', 'player_rush_yds', 'player_reception_yds', 'player_anytime_td', 'player_1st_td', 'player_tds_over', 'team_totals'],
   basketball_nba: [...ALT_MARKETS, 'player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_points_rebounds_assists', 'team_totals'],
   basketball_ncaab: [...ALT_MARKETS],
   basketball_wncaab: [...ALT_MARKETS],
@@ -43,6 +44,99 @@ const TITLES = {
 
 function feedPropsOn(sportKey) {
   return !!PROP_MARKETS[sportKey] && getSetting('props_enabled') === '1';
+}
+
+// ---------- house alt lines ----------
+// Alternate spreads and totals priced here from the main line instead of bought from the feed,
+// so they cost no requests. The final margin and total are modelled as normal curves around the
+// main line, with extra weight on football's key margins (3, 7, 10, 14...) so buying through them
+// costs what it should. Each line is anchored to the main line's own price, then given a little
+// more vig than the main line.
+const HOUSE_ALT = {
+  americanfootball_ncaaf: {
+    marginSd: 15.5, totalSd: 16, steps: 10, vig: 0.03,
+    keys: { 1: 0.8, 3: 1.7, 4: 1.1, 6: 1.1, 7: 1.5, 10: 1.25, 14: 1.25, 17: 1.1, 21: 1.1 },
+  },
+};
+
+function houseAltOn(sportKey) {
+  return !!HOUSE_ALT[sportKey] && getSetting('house_alt_lines') !== '0';
+}
+
+// Chance of each whole-number result, mu +- 6 sd.
+function curve(mu, sd, weight) {
+  const out = [];
+  let sum = 0;
+  for (let x = Math.floor(mu - 6 * sd); x <= Math.ceil(mu + 6 * sd); x++) {
+    const w = Math.exp(-0.5 * ((x - mu) / sd) ** 2) * (weight ? weight(x) : 1);
+    if (w > 0) { out.push([x, w]); sum += w; }
+  }
+  return out.map(([x, w]) => [x, w / sum]);
+}
+
+// Chance the result lands above `line`, pushes left out.
+function aboveProb(dist, line) {
+  let win = 0, lose = 0;
+  for (const [x, p] of dist) { if (x > line) win += p; else if (x < line) lose += p; }
+  return win / (win + lose);
+}
+
+const implied = a => (a < 0 ? -a / (-a + 100) : 100 / (a + 100));
+const logit = p => Math.log(p / (1 - p));
+const unlogit = z => 1 / (1 + Math.exp(-z));
+function toAmerican(p) {
+  const a = p >= 0.5 ? -100 * p / (1 - p) : 100 * (1 - p) / p;
+  const r = Math.round(a / 5) * 5;
+  return r === -100 ? 100 : r;
+}
+
+function houseAltLines(event) {
+  const cfg = HOUSE_ALT[event.sport_key];
+  if (!cfg) return [];
+  const markets = [];
+  const price = fair => toAmerican(Math.min(0.97, fair + cfg.vig));
+  const offer = fair => fair >= 0.08 && fair <= 0.92;
+
+  const home = (event.markets.spreads || []).find(o => o.name === event.home_team);
+  const away = (event.markets.spreads || []).find(o => o.name === event.away_team);
+  if (home && away && home.point != null) {
+    const h0 = Number(home.point);
+    // Home margin (home score minus away score); there are no ties in college football.
+    const dist = curve(-h0, cfg.marginSd, m => (m === 0 ? 0 : cfg.keys[Math.abs(m)] || 1));
+    const homeCovers = hp => aboveProb(dist, -hp);
+    const ih = implied(home.price), ia = implied(away.price);
+    const shift = logit(ih / (ih + ia)) - logit(homeCovers(h0));
+    const outcomes = [];
+    for (let d = -cfg.steps; d <= cfg.steps; d++) {
+      const hp = h0 + d;
+      if (d === 0 || hp === 0) continue;
+      const ph = unlogit(logit(homeCovers(hp)) + shift);
+      if (!offer(ph) || !offer(1 - ph)) continue;
+      outcomes.push({ name: event.away_team, description: null, price: price(1 - ph), point: -hp });
+      outcomes.push({ name: event.home_team, description: null, price: price(ph), point: hp });
+    }
+    if (outcomes.length) markets.push({ key: 'alternate_spreads', title: TITLES.alternate_spreads, outcomes, house: true });
+  }
+
+  const over = (event.markets.totals || []).find(o => o.name === 'Over');
+  const under = (event.markets.totals || []).find(o => o.name === 'Under');
+  if (over && under && over.point != null) {
+    const t0 = Number(over.point);
+    const dist = curve(t0, cfg.totalSd);
+    const io = implied(over.price), iu = implied(under.price);
+    const shift = logit(io / (io + iu)) - logit(aboveProb(dist, t0));
+    const outcomes = [];
+    for (let d = -cfg.steps; d <= cfg.steps; d++) {
+      const t = t0 + d;
+      if (d === 0 || t <= 0) continue;
+      const po = unlogit(logit(aboveProb(dist, t)) + shift);
+      if (!offer(po) || !offer(1 - po)) continue;
+      outcomes.push({ name: 'Over', description: null, price: price(po), point: t });
+      outcomes.push({ name: 'Under', description: null, price: price(1 - po), point: t });
+    }
+    if (outcomes.length) markets.push({ key: 'alternate_totals', title: TITLES.alternate_totals, outcomes, house: true });
+  }
+  return markets;
 }
 
 // ---------- feed props ----------
@@ -229,11 +323,19 @@ function hasSpecials() {
 // Everything a client sees when they open a game's props.
 async function forEvent(sportKey, eventId) {
   const feed = await feedProps(sportKey, eventId);
+  let markets = feed ? feed.markets : [];
+  if (houseAltOn(sportKey)) {
+    const event = (await odds.getEvents(sportKey)).events.find(e => e.id === eventId);
+    if (event && Date.parse(event.commence_time) > Date.now()) {
+      // House lines replace any the feed sent (e.g. from a copy cached before this change).
+      markets = [...houseAltLines(event), ...markets.filter(m => !isAlt(m.key))];
+    }
+  }
   return {
     source: feed ? feed.source : null,
     fetchedAt: feed ? feed.fetchedAt : null,
     bookmaker: feed ? feed.bookmaker : null,
-    markets: feed ? feed.markets : [],
+    markets,
     custom: openCustom(eventId),
   };
 }
@@ -258,7 +360,8 @@ async function resolveLeg(l) {
   const event = (await odds.getEvents(l.sportKey)).events.find(e => e.id === l.eventId);
   if (!event) return { gone: 'One of your games is no longer available.' };
   if (Date.parse(event.commence_time) <= Date.now()) return { gone: `${event.away_team} @ ${event.home_team} has already started.` };
-  const feed = await feedProps(l.sportKey, l.eventId);
+  const house = isAlt(l.market) && houseAltOn(l.sportKey);
+  const feed = house ? { markets: houseAltLines(event) } : await feedProps(l.sportKey, l.eventId);
   const mk = feed && feed.markets.find(m => m.key === l.market);
   const out = mk && mk.outcomes.find(o => o.name === l.selection && (o.description ?? null) === (l.description ?? null)
     && (o.point == null ? l.point == null : Number(o.point) === Number(l.point)));
@@ -267,4 +370,4 @@ async function resolveLeg(l) {
   return { leg: { event, market: l.market, selection: out.name, point: out.point, price: out.price, description: isAlt(l.market) ? null : out.description, propName: mk.title, propId: null } };
 }
 
-module.exports = { isProp, isAlt, isFeedMarket, baseMarket, ALT_MARKETS, PROP_MARKETS, feedPropsOn, forEvent, openCustom, eventsWithCustom, hasSpecials, customView, resolveLeg, _demoMarkets: demoMarkets };
+module.exports = { houseAltOn, houseAltLines, isProp, isAlt, isFeedMarket, baseMarket, ALT_MARKETS, PROP_MARKETS, feedPropsOn, forEvent, openCustom, eventsWithCustom, hasSpecials, customView, resolveLeg, _demoMarkets: demoMarkets };
