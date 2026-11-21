@@ -34,8 +34,11 @@ parlays or teasers (6, 6.5 or 7 points on football and basketball spreads and to
 
 **Odds**: [The Odds API](https://the-odds-api.com) supplies lines from DraftKings, FanDuel,
 BetMGM, Caesars and BetRivers (preference order is editable). Without a key the book runs on demo
-odds. Lines are cached (default 30 minutes per sport) to save quota; the free plan is 500
+odds. Lines are cached (at least 60 minutes per sport) to save quota; the free plan is 500
 requests a month and one sport refresh costs about 3, so a busy book will want the paid plan.
+Whatever quota is left is spread evenly over the days until it resets on the 1st: scores for
+grading come first, then the main board, and props only get what the board leaves. When a day's
+share is used up, clients keep seeing the last lines loaded.
 Bets are checked against the current line when placed; if the price moved, the client is
 shown the new price. Games that already started can't be bet.
 

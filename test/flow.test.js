@@ -799,3 +799,28 @@ test('profit boosts: the bookie creates one, a client uses it once, and a win pa
   assert.ok(!(await c('GET', '/api/boosts')).body.boosts.some(b => b.id === parlayOnly));
   assert.equal((await admin('DELETE', `/api/admin/boosts/${parlayOnly}`)).status, 200);
 });
+
+test('odds requests are paced so the monthly quota lasts until the 1st', () => {
+  const odds = require('../src/odds');
+  const { setSetting, db } = require('../src/db');
+  const keys = ['odds_quota_remaining', 'odds_day', 'odds_day_start'];
+  try {
+    setSetting('odds_quota_remaining', '325');
+    const b = odds.budget();
+    // (325 left - 25 floor) spread over the days until the reset.
+    assert.equal(b.perDay, Math.floor(300 / b.daysLeft));
+    assert.equal(b.usedToday, 0);
+    assert.ok(odds.canSpend('odds', 3) === (3 <= b.perDay * 0.85));
+    // Spend the whole day's share: the board stops refreshing, scores get what's left.
+    setSetting('odds_quota_remaining', String(325 - Math.floor(b.perDay * 0.85)));
+    assert.equal(odds.canSpend('odds', 3), false);
+    assert.equal(odds.canSpend('props', 2), false);
+    // Under the floor nothing is fetched.
+    setSetting('odds_quota_remaining', '23');
+    assert.equal(odds.canSpend('scores', 2), false);
+    setSetting('odds_day', ''); // next day
+    assert.equal(odds.budget().perDay, 0);
+  } finally {
+    db.prepare(`DELETE FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`).run(...keys);
+  }
+});
