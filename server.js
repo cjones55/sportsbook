@@ -506,6 +506,7 @@ const gradeTimer = setInterval(() => {
 gradeTimer.unref();
 
 if (require.main === module) {
+  require(SRC + 'mnf-specials').seed();
   const port = Number(process.env.PORT) || 3000;
   server.listen(port, () => console.log(`${getSetting('book_name')} running on http://localhost:${port} (${odds.isLive() ? 'live odds' : 'demo odds'})`));
 }
