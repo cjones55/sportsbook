@@ -440,6 +440,75 @@ test('the bookie can write, grade and undo their own props', async () => {
   assert.equal((await admin('DELETE', `/api/admin/props/${onGame.body.prop.id}`)).status, 200);
 });
 
+test('paste a list from a sportsbook site: preview, add in one go, grade as a group', async () => {
+  const paste = require('../src/paste');
+  const teams = ['Minnesota Vikings', 'San Francisco 49ers'];
+  const q = (text, o) => paste.parse(text, { teams, ...o }).items.map(i => `${i.category}|${i.question}|${i.options.map(x => `${x.name} ${x.price}`).join(',')}`);
+  assert.deepEqual(q('Christian McCaffrey\t49ers\t-165\nJustin Jefferson\tVikings\t+110'),
+    ['Anytime TD|Christian McCaffrey Anytime TD|Yes -165', 'Anytime TD|Justin Jefferson Anytime TD|Yes 110']);
+  assert.deepEqual(q('FIRST TD SCORER\nChristian McCaffrey\n−165\nShow more'), ['First TD|Christian McCaffrey First TD|Yes -165']);
+  assert.deepEqual(q('Player\tFirst TD\tAnytime TD\t2+ TDs\nGeorge Kittle\t+900\t+200\t+1400'),
+    ['First TD|George Kittle First TD|Yes 900', 'Anytime TD|George Kittle Anytime TD|Yes 200', '2+ TDs|George Kittle 2+ TDs|Yes 1400']);
+  assert.deepEqual(q('George Kittle +200 +150', { columns: ['anytime_td', 'no'] }), ['Anytime TD|George Kittle Anytime TD|Yes 200,No 150']);
+  assert.deepEqual(q('Vikings +3.5 -120\n49ers -3.5 +100\nOver 47.5 -110\nUnder 47.5 -110\nSam Darnold Anytime TD EVEN'), [
+    'Spreads|Vikings +3.5 / 49ers -3.5|Vikings +3.5 -120,49ers -3.5 100', 'Totals|Total 47.5|Over 47.5 -110,Under 47.5 -110', 'Anytime TD|Sam Darnold Anytime TD|Yes 100']);
+  assert.deepEqual(q('Justin Jefferson Receiving Yards Over 85.5 -115 Under 85.5 -105'), ['Player Props|Justin Jefferson Receiving Yards 85.5|Over 85.5 -115,Under 85.5 -105']);
+  assert.deepEqual(q('Christian McCaffrey -165', { type: 'first_td' }), ['First TD|Christian McCaffrey First TD|Yes -165']);
+
+  const admin = client();
+  await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });
+  const joe = client();
+  await joe('POST', '/api/login', { username: 'joe', password: 'secret1' });
+  const joeRow = db.prepare("SELECT * FROM users WHERE username = 'joe'").get();
+  const ev = future('americanfootball_nfl')[1];
+  const prev = await admin('POST', '/api/admin/props/paste', { sportKey: ev.sport_key, eventId: ev.id, text: 'Player A\t-165\nPlayer B\t+250\nnonsense line' });
+  assert.equal(prev.status, 200, JSON.stringify(prev.body));
+  assert.equal(prev.body.items.length, 2);
+  assert.deepEqual(prev.body.skipped, ['nonsense line']);
+  assert.equal((await joe('POST', '/api/admin/props/paste', { sportKey: ev.sport_key, eventId: ev.id, text: 'x -110' })).status, 403);
+
+  const add = await admin('POST', '/api/admin/props/bulk', { sportKey: ev.sport_key, eventId: ev.id, items: prev.body.items });
+  assert.deepEqual(add.body, { added: 2, updated: 0 });
+  // Pasting again updates the odds instead of adding copies.
+  const again = (await admin('POST', '/api/admin/props/paste', { sportKey: ev.sport_key, eventId: ev.id, text: 'Player A -150' })).body;
+  assert.equal(again.items[0].exists, true);
+  assert.deepEqual((await admin('POST', '/api/admin/props/bulk', { sportKey: ev.sport_key, eventId: ev.id, items: again.items })).body, { added: 0, updated: 1 });
+
+  // Clients see them under an "Anytime TD" tab and can bet them.
+  const gp = (await joe('GET', `/api/props/${ev.sport_key}/${ev.id}`)).body;
+  const a = gp.custom.find(c => c.question === 'Player A Anytime TD'), b = gp.custom.find(c => c.question === 'Player B Anytime TD');
+  assert.equal(a.category, 'Anytime TD');
+  assert.equal(a.options[0].price, -150);
+  assert.ok((await joe('GET', `/api/odds/${ev.sport_key}`)).body.events.find(e => e.id === ev.id).hasProps);
+  const leg = (p, price) => ({ eventId: p.eventId, sportKey: p.sportKey, market: 'custom', propId: p.id, selection: 'Yes', point: null, price });
+  const ba = (await joe('POST', '/api/bets', { type: 'single', stake: 15, legs: [leg(a, -150)] })).body.bet;
+  const bb = (await joe('POST', '/api/bets', { type: 'single', stake: 10, legs: [leg(b, 250)] })).body.bet;
+  assert.ok(ba && bb);
+
+  // Grade the group: A scored, B didn't.
+  const before = balance(joeRow.id);
+  const g = await admin('POST', '/api/admin/props/grade', { results: [{ id: a.id, winner: 'Yes' }, { id: b.id, winner: 'none' }] });
+  assert.equal(g.body.graded, 2);
+  assert.equal(bets.getBet(ba.id).status, 'won');
+  assert.equal(bets.getBet(bb.id).status, 'lost');
+  assert.equal(balance(joeRow.id), before + 2500);
+  assert.equal((await admin('GET', '/api/admin/props')).body.props.find(p => p.id === b.id).result, 'No');
+
+  // Feed props for one game only.
+  db.prepare("INSERT INTO settings(key, value) VALUES('props_enabled', '0') ON CONFLICT(key) DO UPDATE SET value = '0'").run();
+  try {
+    const other = future('americanfootball_nfl')[2];
+    assert.equal((await joe('GET', `/api/props/${other.sport_key}/${other.id}`)).body.markets.length, 0);
+    await admin('POST', '/api/admin/props/feed', { eventId: other.id, on: true });
+    assert.ok((await joe('GET', `/api/props/${other.sport_key}/${other.id}`)).body.markets.length > 0);
+    assert.ok((await joe('GET', `/api/odds/${other.sport_key}`)).body.events.find(e => e.id === other.id).hasProps);
+    await admin('POST', '/api/admin/props/feed', { eventId: other.id, on: false });
+    assert.equal((await joe('GET', `/api/props/${other.sport_key}/${other.id}`)).body.markets.length, 0);
+  } finally {
+    db.prepare("DELETE FROM settings WHERE key IN ('props_enabled', 'props_events')").run();
+  }
+});
+
 test('first TD props, and props in parlays wait for the bookie', async () => {
   const admin = client();
   await admin('POST', '/api/login', { username: 'admin', password: 'adminpass' });

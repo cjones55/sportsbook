@@ -270,7 +270,9 @@
   }
 
   function customBlock(c, info) {
-    return `<div class="prop-row"><div class="prop-q">${esc(c.question)}</div>
+    // Under a tab like "Anytime TD", "Christian McCaffrey Anytime TD" reads as just the player.
+    const q = c.category && c.question.toLowerCase().endsWith(' ' + c.category.toLowerCase()) ? c.question.slice(0, -c.category.length - 1) : c.question;
+    return `<div class="prop-row"><div class="prop-q">${esc(q)}</div>
       <div class="prop-odds wrap">${c.options.map(o => cell({ ...info, market: 'custom', propId: c.id, propName: c.question, selection: o.name, point: null, price: o.price }, o.name)).join('')}</div></div>`;
   }
 
@@ -278,11 +280,13 @@
     const d = state.props[ev.id];
     if (!d) return '<div class="props"><div class="muted small">Loading…</div></div>';
     if (d.error) return `<div class="props"><div class="muted small">${esc(d.error)}</div></div>`;
-    const tabs = [...(d.custom.length ? [['custom', 'Specials']] : []), ...d.markets.map(m => [m.key, m.title])];
+    // The bookie's own props, one tab per kind (Anytime TD, Spreads, ...); uncategorized ones under Specials.
+    const cats = [...new Set(d.custom.map(c => c.category || ''))];
+    const tabs = [...cats.map(c => ['custom:' + c, c || 'Specials']), ...d.markets.map(m => [m.key, m.title])];
     if (!tabs.length) return '<div class="props"><div class="muted small">No extra bets for this game right now.</div></div>';
     const tab = tabs.some(t => t[0] === state.propTab[ev.id]) ? state.propTab[ev.id] : tabs[0][0];
     let body = '';
-    if (tab === 'custom') body = d.custom.map(c => customBlock(c, evInfo(ev))).join('');
+    if (tab.startsWith('custom:')) body = d.custom.filter(c => (c.category || '') === tab.slice(7)).map(c => customBlock(c, evInfo(ev))).join('');
     else {
       const m = d.markets.find(x => x.key === tab);
       const nick = t => String(t).split(' ').slice(-1)[0];
@@ -891,16 +895,32 @@
   }
 
   async function renderAdminProps() {
-    const view = shell(`<div class="row between"><h1>Props</h1><button class="btn primary" id="newProp">New prop</button></div>
-      <p class="muted small">Write your own props, on a game or as a stand-alone special (awards, futures, anything). Clients see them under the game's Props, or under Specials. When it's decided, pick the winner and every bet on it is graded. Props from the odds feed are graded under <a href="#/admin/bets">Bets</a>.</p>
+    const view = shell(`<div class="row between"><h1>Props</h1><div class="row"><button class="btn" id="newProp">New prop</button><button class="btn primary" id="pasteProps">Paste props</button></div></div>
+      <p class="muted small"><b>Fastest way:</b> press <b>Paste props</b>, pick the game, then copy a list of props from any sportsbook site (for example the Anytime TD Scorer list) and paste it in. You'll see every prop before anything is added. Clients see them under the game's <b>More bets</b>. When the game is over, press <b>Grade</b> on a group and tick the ones that hit. Props from the odds feed are graded under <a href="#/admin/bets">Bets</a>.</p>
       <div id="list"><div class="empty">Loading…</div></div>`);
     $('#newProp', view).onclick = () => newPropModal(renderAdminProps);
+    $('#pasteProps', view).onclick = () => pastePropsModal(renderAdminProps);
     const { props } = await api('GET', '/api/admin/props');
     const list = $('#list', view);
-    if (!props.length) { list.innerHTML = '<div class="empty">No props yet.</div>'; return; }
-    list.innerHTML = props.map(p => {
-      const closed = p.status !== 'open' || Date.parse(p.commenceTime) <= Date.now();
-      const status = p.status === 'settled' ? 'settled' : closed ? 'closed' : 'open';
+    if (!props.length) { list.innerHTML = '<div class="empty">No props yet. Press <b>Paste props</b> to add a game\'s props in one go.</div>'; return; }
+    const statusOf = p => p.status === 'settled' ? 'settled' : p.status !== 'open' || Date.parse(p.commenceTime) <= Date.now() ? 'closed' : 'open';
+    const singleYes = p => p.options.length === 1 || (p.options.length === 2 && p.options.some(o => o.name === 'Yes') && p.options.some(o => o.name === 'No'));
+    // Props pasted in together (same game, same kind) are shown and graded as one group.
+    const groups = [];
+    for (const p of props) {
+      const key = p.category ? `${p.eventId}|${p.category}` : `one|${p.id}`;
+      let g = groups.find(x => x.key === key);
+      if (!g) groups.push(g = { key, category: p.category, props: [] });
+      g.props.push(p);
+    }
+    const shortQ = p => p.category && p.question.toLowerCase().endsWith(' ' + p.category.toLowerCase()) ? p.question.slice(0, -p.category.length - 1) : p.question;
+    const rowActions = p => p.status === 'settled'
+      ? `<span class="small">Result <b>${esc(p.result)}</b></span> <button class="btn sm" data-regrade="${p.id}">Undo</button>`
+      : `${singleYes(p) ? `<button class="btn sm" data-pwin="${p.id}" data-opt="${esc(p.options[0].name)}">Hit</button><button class="btn sm" data-pwin="${p.id}" data-opt="none">Miss</button>`
+          : p.options.map(o => `<button class="btn sm" data-pwin="${p.id}" data-opt="${esc(o.name)}">${esc(o.name)} won</button>`).join('')}
+         ${p.bets ? `<button class="btn sm danger" data-pwin="${p.id}" data-opt="void">Void</button>` : `<button class="btn sm danger" data-pdel="${p.id}" title="Delete">✕</button>`}`;
+    const fullCard = p => {
+      const status = statusOf(p);
       return `<div class="bet">
         <div class="bet-head"><div><b>${esc(p.question)}</b><div class="small muted">${esc(evName(p.awayTeam, p.homeTeam, p.sportTitle))} · ${p.sportKey === 'specials' ? 'closes' : 'starts'} ${esc(when(p.commenceTime))}</div></div>
           <span class="pill ${status === 'settled' ? 'won' : status === 'open' ? 'pending' : ''}">${status}</span></div>
@@ -908,18 +928,55 @@
         <div class="bet-foot"><span>${p.bets} bet${p.bets === 1 ? '' : 's'} · ${money(p.stakeCents)} staked</span>
           ${p.status === 'settled' ? `<span>Result <b>${esc(p.result)}</b></span><button class="btn sm" data-regrade="${p.id}">Undo grading</button>` : `
             ${p.status === 'open' ? `<button class="btn sm" data-pstatus="${p.id}|closed">Stop taking bets</button>` : `<button class="btn sm" data-pstatus="${p.id}|open">Reopen</button>`}
-            ${p.bets ? `<span class="settle">${p.options.map(o => `<button class="btn sm" data-pwin="${p.id}" data-opt="${esc(o.name)}">${esc(o.name)} won</button>`).join('')}<button class="btn sm danger" data-pwin="${p.id}" data-opt="void">Void</button></span>`
+            ${p.bets ? `<span class="settle">${p.options.map(o => `<button class="btn sm" data-pwin="${p.id}" data-opt="${esc(o.name)}">${esc(o.name)} won</button>`).join('')}${singleYes(p) ? `<button class="btn sm" data-pwin="${p.id}" data-opt="none">Didn't hit</button>` : ''}<button class="btn sm danger" data-pwin="${p.id}" data-opt="void">Void</button></span>`
               : `<button class="btn sm danger" data-pdel="${p.id}">Delete</button>`}`}
         </div></div>`;
+    };
+    list.innerHTML = groups.map((g, gi) => {
+      if (!g.category) return fullCard(g.props[0]);
+      const p0 = g.props[0];
+      const ungraded = g.props.filter(p => p.status !== 'settled');
+      const bets = g.props.reduce((a, p) => a + p.bets, 0), stake = g.props.reduce((a, p) => a + p.stakeCents, 0);
+      const anyOpen = g.props.some(p => statusOf(p) === 'open');
+      return `<div class="bet">
+        <div class="bet-head"><div><b>${esc(g.category)}</b> <span class="muted">· ${g.props.length} prop${g.props.length === 1 ? '' : 's'}</span><div class="small muted">${esc(evName(p0.awayTeam, p0.homeTeam, p0.sportTitle))} · starts ${esc(when(p0.commenceTime))} · ${bets} bet${bets === 1 ? '' : 's'}, ${money(stake)} staked</div></div>
+          <span class="pill ${!ungraded.length ? 'won' : anyOpen ? 'pending' : ''}">${!ungraded.length ? 'graded' : anyOpen ? 'open' : 'closed'}</span></div>
+        <div class="row" style="gap:6px;margin:6px 0">
+          ${ungraded.length ? `<button class="btn sm primary" data-ggrade="${gi}">Grade</button>` : ''}
+          ${anyOpen ? `<button class="btn sm" data-gclose="${gi}">Stop taking bets</button>` : ungraded.length ? `<button class="btn sm" data-gopen="${gi}">Reopen</button>` : ''}
+          <button class="btn sm" data-gshow="${gi}">Show ${g.props.length}</button>
+          ${g.props.some(p => !p.bets && p.status !== 'settled') ? `<button class="btn sm danger" data-gdel="${gi}">Delete ones with no bets</button>` : ''}
+        </div>
+        <div class="table-wrap hidden" data-gbody="${gi}"><table><thead><tr><th>Prop</th><th>Odds</th><th class="r">Bets</th><th></th></tr></thead><tbody>
+          ${g.props.map(p => `<tr><td>${esc(shortQ(p))}${statusOf(p) === 'closed' && p.status !== 'settled' ? ' <span class="pill">closed</span>' : ''}</td>
+            <td class="num">${p.options.map(o => `${p.options.length > 1 ? esc(o.name) + ' ' : ''}${odds(o.price)}${p.result === o.name ? ' ✓' : ''}`).join(' · ')}</td>
+            <td class="r num">${p.bets ? `${p.bets} · ${money(p.stakeCents)}` : '–'}</td><td class="r" style="white-space:nowrap">${rowActions(p)}</td></tr>`).join('')}
+        </tbody></table></div></div>`;
     }).join('');
     const act = async (fn, msg) => { try { const r = await fn(); toast(typeof msg === 'function' ? msg(r) : msg); renderAdminProps(); } catch (e) { toast(e.message, true); } };
+    $$('[data-gshow]', list).forEach(b => b.onclick = () => {
+      const body = $(`[data-gbody="${b.dataset.gshow}"]`, list);
+      body.classList.toggle('hidden');
+      b.textContent = body.classList.contains('hidden') ? `Show ${groups[b.dataset.gshow].props.length}` : 'Hide';
+    });
+    $$('[data-ggrade]', list).forEach(b => b.onclick = () => gradeGroupModal(groups[b.dataset.ggrade], renderAdminProps));
+    const setAll = (g, status) => act(async () => { for (const p of g.props) if (p.status !== 'settled') await api('PATCH', `/api/admin/props/${p.id}`, { status }); },
+      status === 'open' ? 'Props reopened.' : 'Props closed to new bets.');
+    $$('[data-gclose]', list).forEach(b => b.onclick = () => setAll(groups[b.dataset.gclose], 'closed'));
+    $$('[data-gopen]', list).forEach(b => b.onclick = () => setAll(groups[b.dataset.gopen], 'open'));
+    $$('[data-gdel]', list).forEach(b => b.onclick = () => {
+      const g = groups[b.dataset.gdel];
+      const ids = g.props.filter(p => !p.bets && p.status !== 'settled').map(p => p.id);
+      if (!confirm(`Delete ${ids.length} ${g.category} prop${ids.length === 1 ? '' : 's'} that nobody has bet on?`)) return;
+      act(() => api('POST', '/api/admin/props/delete-unbet', { ids }), r => `Deleted ${r.deleted}.`);
+    });
     $$('[data-pstatus]', list).forEach(b => b.onclick = () => {
       const [id, status] = b.dataset.pstatus.split('|');
       act(() => api('PATCH', `/api/admin/props/${id}`, { status }), status === 'open' ? 'Prop reopened.' : 'Prop closed to new bets.');
     });
     $$('[data-pwin]', list).forEach(b => b.onclick = () => {
       const opt = b.dataset.opt;
-      if (!confirm(opt === 'void' ? 'Void every bet on this prop and refund the stakes?' : `Grade "${opt}" as the winner? Every other option loses.`)) return;
+      if (!confirm(opt === 'void' ? 'Void every bet on this prop and refund the stakes?' : opt === 'none' ? 'Grade this as a miss? Every bet on it loses.' : `Grade "${opt}" as the winner? Every other option loses.`)) return;
       act(() => api('POST', `/api/admin/props/${b.dataset.pwin}/settle`, { winner: opt }), r => `Graded ${r.graded} bet${r.graded === 1 ? '' : 's'}.`);
     });
     $$('[data-regrade]', list).forEach(b => b.onclick = () => {
@@ -929,6 +986,156 @@
     $$('[data-pdel]', list).forEach(b => b.onclick = () => {
       if (!confirm('Delete this prop?')) return;
       act(() => api('DELETE', `/api/admin/props/${b.dataset.pdel}`), 'Prop deleted.');
+    });
+  }
+
+  // Grade a whole group at once: tick the ones that hit, everything else loses.
+  function gradeGroupModal(g, done) {
+    const todo = g.props.filter(p => p.status !== 'settled');
+    const yesNo = p => p.options.length === 1 || (p.options.length === 2 && p.options.some(o => o.name === 'Yes') && p.options.some(o => o.name === 'No'));
+    const shortQ = p => p.question.toLowerCase().endsWith(' ' + g.category.toLowerCase()) ? p.question.slice(0, -g.category.length - 1) : p.question;
+    modal(`<div class="modal-head"><h2>Grade ${esc(g.category)}</h2><button class="btn sm" data-close>Close</button></div>
+      <p class="muted small" style="margin-top:0">Tick every one that <b>hit</b>. Anything not ticked loses. Pick <b>Void</b> to refund a prop instead (for example a player who didn't play).</p>
+      <div class="table-wrap"><table><thead><tr><th>Prop</th><th>Result</th></tr></thead><tbody>
+        ${todo.map(p => `<tr data-gid="${p.id}"><td>${esc(shortQ(p))}<div class="small muted">${p.bets} bet${p.bets === 1 ? '' : 's'}</div></td><td>
+          ${yesNo(p) ? `<label class="check" style="margin:0"><input type="checkbox" data-hit value="${esc(p.options.find(o => o.name !== 'No').name)}"> Hit</label>
+            <label class="check small muted" style="margin:4px 0 0"><input type="checkbox" data-void> Void</label>`
+            : `<select data-pick><option value="">Pick the winner…</option>${p.options.map(o => `<option value="${esc(o.name)}">${esc(o.name)}</option>`).join('')}<option value="void">Void (refund)</option></select>`}
+        </td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="error" id="gErr"></div>
+      <button class="btn primary" id="gGo" style="margin-top:12px">Grade ${todo.length} prop${todo.length === 1 ? '' : 's'}</button>`, (root, close) => {
+      $('#gGo', root).onclick = async () => {
+        const results = [];
+        for (const tr of $$('[data-gid]', root)) {
+          const id = Number(tr.dataset.gid);
+          const pick = $('[data-pick]', tr);
+          if (pick) { if (pick.value) results.push({ id, winner: pick.value }); continue; }
+          results.push({ id, winner: $('[data-void]', tr).checked ? 'void' : $('[data-hit]', tr).checked ? $('[data-hit]', tr).value : 'none' });
+        }
+        if (!results.length) { $('#gErr', root).textContent = 'Pick a result first.'; return; }
+        const hits = results.filter(r => r.winner !== 'none' && r.winner !== 'void').length;
+        if (!confirm(`Grade ${results.length} props: ${hits} hit, ${results.length - hits} miss or void? Bets are paid out right away (you can undo).`)) return;
+        try { const r = await api('POST', '/api/admin/props/grade', { results }); close(); toast(`Graded ${r.graded} bet${r.graded === 1 ? '' : 's'}.`); done(); }
+        catch (e) { $('#gErr', root).textContent = e.message; }
+      };
+    });
+  }
+
+  // Sport and game pickers, filled from the board.
+  async function fillGamePicker(sportSel, gameSel, onGame) {
+    const loadGamesFor = async () => {
+      gameSel.innerHTML = '<option value="">Loading…</option>';
+      try {
+        const { events } = await api('GET', '/api/odds/' + encodeURIComponent(sportSel.value));
+        gameSel._events = events;
+        gameSel.innerHTML = events.length ? events.map(e => `<option value="${esc(e.id)}">${esc(e.away_team)} @ ${esc(e.home_team)} · ${esc(when(e.commence_time))}</option>`).join('') : '<option value="">No upcoming games</option>';
+      } catch (e) { gameSel.innerHTML = `<option value="">${esc(e.message)}</option>`; }
+      onGame && onGame();
+    };
+    try {
+      const { sports } = await api('GET', '/api/sports');
+      const list = sports.filter(x => x.key !== 'specials');
+      // Football first: that's what props are usually for.
+      list.sort((a, b) => (b.key === 'americanfootball_nfl') - (a.key === 'americanfootball_nfl'));
+      sportSel.innerHTML = list.map(x => `<option value="${esc(x.key)}">${esc(x.title)}</option>`).join('');
+      sportSel.onchange = loadGamesFor;
+      gameSel.onchange = () => onGame && onGame();
+      if (sportSel.value) await loadGamesFor(); else gameSel.innerHTML = '<option value="">No sports open</option>';
+    } catch (e) { toast(e.message, true); }
+  }
+
+  // Paste a list from a sportsbook site, check it, and add it all in one go.
+  function pastePropsModal(done) {
+    modal(`<div class="modal-head"><h2>Paste props</h2><button class="btn sm" data-close>Close</button></div>
+      <div class="grid2">
+        <label class="field"><span>1. Sport</span><select id="xSport"></select></label>
+        <label class="field"><span>2. Game</span><select id="xGame"><option value="">Loading…</option></select></label>
+      </div>
+      <label class="field"><span>3. Paste the list here</span><textarea id="xText" rows="9" placeholder="On DraftKings, FanDuel or any sportsbook site: open the game, go to the TD scorer list (or spreads, totals, player props), select the list with your mouse, copy it, and paste it here. Like:
+
+Christian McCaffrey   -165
+Justin Jefferson   +110
+Vikings +3.5 -120
+Over 47.5 -110"></textarea></label>
+      <div class="grid2">
+        <label class="field"><span>What kind of bets are these?</span><select id="xType"><option value="auto">Figure it out for me</option></select></label>
+        <div class="field" style="display:flex;align-items:flex-end"><button class="btn primary" id="xRead" type="button" style="width:100%">Check the list</button></div>
+      </div>
+      <div class="error" id="xErr"></div>
+      <div id="xPrev"></div>
+      <details style="margin-top:14px"><summary class="small muted" style="cursor:pointer">Odds feed props for this game</summary>
+        <div id="xFeed" class="small muted" style="margin-top:8px">Pick a game.</div></details>`, async (root, close) => {
+      const sportSel = $('#xSport', root), gameSel = $('#xGame', root), typeSel = $('#xType', root);
+      let last = null; // the last preview: { items, columns, skipped, types }
+      const game = () => (gameSel._events || []).find(e => e.id === gameSel.value);
+      const drawFeed = async () => {
+        const box = $('#xFeed', root), g = game();
+        if (!g) { box.textContent = 'Pick a game.'; return; }
+        try {
+          const f = await api('GET', '/api/admin/props/feed');
+          if (f.all) { box.innerHTML = 'Odds feed props are on for every game (Settings). Nothing to do here.'; return; }
+          const on = f.events.includes(g.id);
+          box.innerHTML = `<label class="check"><input type="checkbox" id="xFeedOn" ${on ? 'checked' : ''}> Show props from the odds feed for <b>${esc(g.away_team)} @ ${esc(g.home_team)}</b> only</label>
+            <div>Uses about 10 odds requests each time this game's props refresh (every few hours, only when someone opens the game).${f.live ? '' : ' No odds feed key is set, so this shows demo props.'} If the month's requests are used up, nothing will show until they reset; your pasted props still work.</div>`;
+          $('#xFeedOn', root).onchange = async e => {
+            try { await api('POST', '/api/admin/props/feed', { eventId: g.id, on: e.target.checked }); toast(e.target.checked ? 'Feed props on for this game.' : 'Feed props off for this game.'); }
+            catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
+          };
+        } catch (e) { box.textContent = e.message; }
+      };
+      await fillGamePicker(sportSel, gameSel, () => { last = null; $('#xPrev', root).innerHTML = ''; drawFeed(); });
+
+      const read = async columns => {
+        $('#xErr', root).textContent = '';
+        if (!gameSel.value) { $('#xErr', root).textContent = 'Pick the game first.'; return; }
+        if (!$('#xText', root).value.trim()) { $('#xErr', root).textContent = 'Paste the list first.'; return; }
+        try {
+          last = await api('POST', '/api/admin/props/paste', { sportKey: sportSel.value, eventId: gameSel.value, text: $('#xText', root).value, type: typeSel.value, columns });
+          drawPreview();
+        } catch (e) { $('#xErr', root).textContent = e.message; }
+      };
+      $('#xRead', root).onclick = () => read(null);
+      typeSel.onchange = () => last && read(null);
+      typeSel.insertAdjacentHTML('beforeend', [['anytime_td', 'Anytime TD'], ['first_td', 'First TD'], ['last_td', 'Last TD'], ['two_td', '2+ TDs'], ['three_td', '3+ TDs']]
+        .map(([k, l]) => `<option value="${k}">All ${l}</option>`).join(''));
+
+      const drawPreview = () => {
+        const box = $('#xPrev', root);
+        const { items, columns, skipped } = last;
+        const colLabels = [...last.types.map(t => [t.key, t.label]), ['no', 'No (other side)'], ['skip', 'Leave out']];
+        box.innerHTML = `
+          ${columns ? `<div class="bet" style="margin-top:10px"><b>Each player has ${columns.length} prices.</b> <span class="small muted">Say what each column is (look at the site you copied from):</span>
+            <div class="row" style="margin-top:8px">${columns.map((c, i) => `<label class="field" style="margin:0"><span>Price ${i + 1}</span><select data-col="${i}">${colLabels.map(([k, l]) => `<option value="${k}" ${k === c ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`).join('')}</div></div>` : ''}
+          ${items.length ? `<p style="margin:12px 0 6px"><b>Found ${items.length} prop${items.length === 1 ? '' : 's'}.</b> <span class="small muted">Untick any you don't want, and fix a name or price if it's wrong.</span></p>
+          <div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="xAll" checked aria-label="All"></th><th>Tab</th><th>Prop</th><th>Odds</th></tr></thead><tbody>
+            ${items.map((it, i) => `<tr data-i="${i}"><td><input type="checkbox" data-on checked></td><td class="small muted">${esc(it.category)}</td>
+              <td><input type="text" data-q value="${esc(it.question)}" style="min-width:180px">${it.exists ? '<div class="small muted">Already added: this updates its odds</div>' : ''}</td>
+              <td style="white-space:nowrap">${it.options.map((o, j) => `<div class="row" style="gap:6px;flex-wrap:nowrap;margin:2px 0">${it.options.length > 1 || o.name !== 'Yes' ? `<span class="small">${esc(o.name)}</span>` : ''}<input type="text" inputmode="numeric" data-o="${j}" value="${esc(odds(o.price))}" style="width:80px"></div>`).join('')}</td></tr>`).join('')}
+          </tbody></table></div>` : '<div class="empty" style="padding:20px">No props found in what you pasted. Make sure each line has a name and odds like -165 or +250.</div>'}
+          ${skipped.length ? `<details style="margin-top:8px"><summary class="small muted" style="cursor:pointer">${skipped.length} line${skipped.length === 1 ? '' : 's'} not used</summary><div class="small muted">${skipped.map(esc).join('<br>')}</div></details>` : ''}
+          ${items.length ? `<div class="error" id="xErr2"></div><button class="btn primary" id="xAdd" style="margin-top:12px;width:100%">Add ${items.length} prop${items.length === 1 ? '' : 's'} to the game</button>` : ''}`;
+        $$('[data-col]', box).forEach(s => s.onchange = () => read($$('[data-col]', box).map(x => x.value)));
+        const count = () => { const n = $$('[data-on]', box).filter(c => c.checked).length; const b = $('#xAdd', box); if (b) { b.textContent = `Add ${n} prop${n === 1 ? '' : 's'} to the game`; b.disabled = !n; } };
+        $$('[data-on]', box).forEach(c => c.onchange = count);
+        const all = $('#xAll', box);
+        if (all) all.onchange = () => { $$('[data-on]', box).forEach(c => { c.checked = all.checked; }); count(); };
+        const add = $('#xAdd', box);
+        if (add) add.onclick = async () => {
+          const chosen = $$('tr[data-i]', box).filter(tr => $('[data-on]', tr).checked).map(tr => {
+            const it = items[Number(tr.dataset.i)];
+            return { category: it.category, question: $('[data-q]', tr).value, options: it.options.map((o, j) => ({ name: o.name, price: $(`[data-o="${j}"]`, tr).value.trim() })) };
+          });
+          add.disabled = true;
+          try {
+            const r = await api('POST', '/api/admin/props/bulk', { sportKey: sportSel.value, eventId: gameSel.value, items: chosen });
+            close();
+            toast(`Added ${r.added} prop${r.added === 1 ? '' : 's'}${r.updated ? `, updated ${r.updated}` : ''}. Clients see them now under More bets.`);
+            state.sports = [];
+            done();
+          } catch (e) { $('#xErr2', box).textContent = e.message; add.disabled = false; }
+        };
+      };
     });
   }
 

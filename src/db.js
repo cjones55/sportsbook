@@ -132,6 +132,8 @@ addColumn('bet_legs', 'description', 'TEXT');
 addColumn('bet_legs', 'prop_name', 'TEXT');
 addColumn('bet_legs', 'prop_id', 'INTEGER');
 db.exec('CREATE INDEX IF NOT EXISTS idx_legs_prop ON bet_legs(prop_id)');
+// The tab a bookie's prop shows under on the game (e.g. "Anytime TD"); none means "Specials".
+addColumn('custom_props', 'category', 'TEXT');
 // Profit boosts: the bookie raises the winnings (profit, not stake) on a bet by a percentage.
 db.exec(`CREATE TABLE IF NOT EXISTS boosts (
   id INTEGER PRIMARY KEY,
@@ -189,6 +191,8 @@ const DEFAULT_SETTINGS = {
   auto_grade: '1',
   props_enabled: '1',
   props_ttl_minutes: '180',
+  // Games that get props from the odds feed even when feed props are off for everything else.
+  props_events: '',
   blackjack_enabled: '1',
   blackjack_min_cents: '100',
   blackjack_max_cents: '100000',

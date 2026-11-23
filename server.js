@@ -18,6 +18,7 @@ const auth = require(SRC + 'auth');
 const odds = require(SRC + 'odds');
 const bets = require(SRC + 'bets');
 const props = require(SRC + 'props');
+const paste = require(SRC + 'paste');
 const blackjack = require(SRC + 'blackjack');
 const boosts = require(SRC + 'boosts');
 const { UserError } = bets;
@@ -163,9 +164,10 @@ route('GET', '/api/odds/:sport', async (req, res, { params }) => {
   const r = await odds.getEvents(params.sport);
   const custom = props.eventsWithCustom();
   const feed = props.feedPropsOn(params.sport);
+  const one = props.feedEvents();
   const events = r.events.filter(e => Date.parse(e.commence_time) > Date.now())
     .sort((a, b) => a.commence_time.localeCompare(b.commence_time))
-    .map(e => ({ ...e, hasProps: feed || custom.has(e.id) }));
+    .map(e => ({ ...e, hasProps: feed || custom.has(e.id) || (one.has(e.id) && props.feedPropsOn(params.sport, e.id)) }));
   return { fetchedAt: r.fetchedAt, source: r.source, events };
 });
 
@@ -352,6 +354,102 @@ route('POST', '/api/admin/props', { auth: 'admin' }, async (req, res, { body }) 
     return Number(lastInsertRowid);
   });
   return { prop: props.customView(db.prepare('SELECT * FROM custom_props WHERE id = ?').get(id)) };
+});
+
+// Paste a list copied from a sportsbook site: read it into props for one game (nothing is saved yet).
+async function boardGame(sportKey, eventId) {
+  const ev = (await odds.getEvents(String(sportKey || ''))).events.find(e => e.id === eventId);
+  if (!ev) throw new UserError('That game is not on the board.');
+  return ev;
+}
+
+route('POST', '/api/admin/props/paste', { auth: 'admin' }, async (req, res, { body }) => {
+  const ev = await boardGame(body.sportKey, body.eventId);
+  const text = String(body.text || '').slice(0, 100000);
+  if (!text.trim()) throw new UserError('Paste the list first.');
+  const r = paste.parse(text, {
+    teams: [ev.away_team, ev.home_team],
+    type: String(body.type || 'auto'),
+    columns: Array.isArray(body.columns) ? body.columns.map(String) : null,
+    fallback: ev.sport_key.startsWith('americanfootball_') ? 'anytime_td' : 'Props',
+  });
+  const have = new Set(db.prepare('SELECT lower(question) q FROM custom_props WHERE event_id = ?').all(ev.id).map(x => x.q));
+  return { ...r, items: r.items.map(i => ({ ...i, exists: have.has(i.question.toLowerCase()) })), types: paste.TYPES.map(t => ({ key: t.key, label: t.label })) };
+});
+
+// Create many props on one game at once (what the paste preview showed, after any edits).
+route('POST', '/api/admin/props/bulk', { auth: 'admin' }, async (req, res, { body }) => {
+  const ev = await boardGame(body.sportKey, body.eventId);
+  if (Date.parse(ev.commence_time) <= Date.now()) throw new UserError('That game has already started.');
+  const items = (Array.isArray(body.items) ? body.items : []).slice(0, 500).map((it, n) => {
+    const question = String(it.question || '').trim().slice(0, 200);
+    if (!question) throw new UserError(`Row ${n + 1} has no name.`);
+    const category = String(it.category || '').replace(/[|]/g, ' ').trim().slice(0, 40) || null;
+    const options = (Array.isArray(it.options) ? it.options : []).map(o => {
+      const name = String(o.name || '').trim().slice(0, 80);
+      const price = Math.round(Number(String(o.price ?? '').replace(/^\+/, '')));
+      if (!name || !Number.isFinite(price) || Math.abs(price) < 100) throw new UserError(`Odds for "${question}" must be American odds like -110 or +250.`);
+      return { name, price };
+    });
+    if (!options.length) throw new UserError(`"${question}" has no odds.`);
+    if (new Set(options.map(o => o.name)).size !== options.length) throw new UserError(`"${question}" has two options with the same name.`);
+    return { question, category, options };
+  });
+  if (!items.length) throw new UserError('Nothing to add.');
+  // Pasting the same list again updates the odds instead of making copies.
+  let added = 0, updated = 0;
+  tx(() => {
+    for (const it of items) {
+      const prev = db.prepare("SELECT * FROM custom_props WHERE event_id = ? AND lower(question) = lower(?) AND status != 'settled'").get(ev.id, it.question);
+      if (prev) {
+        const old = JSON.parse(prev.options);
+        // Options someone has bet on stay, so their bets can still be graded.
+        const bet = new Set(db.prepare('SELECT DISTINCT selection FROM bet_legs WHERE prop_id = ?').all(prev.id).map(r => r.selection));
+        const merged = [...it.options, ...old.filter(o => bet.has(o.name) && !it.options.some(n => n.name === o.name))];
+        db.prepare("UPDATE custom_props SET options = ?, category = ?, status = 'open' WHERE id = ?").run(JSON.stringify(merged), it.category, prev.id);
+        updated++;
+      } else {
+        db.prepare(`INSERT INTO custom_props(event_id, sport_key, sport_title, home_team, away_team, commence_time, question, options, category)
+          VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(ev.id, ev.sport_key, ev.sport_title, ev.home_team, ev.away_team, ev.commence_time, it.question, JSON.stringify(it.options), it.category);
+        added++;
+      }
+    }
+  });
+  return { added, updated };
+});
+
+// Grade many props at once: [{ id, winner }], winner being an option, 'none' (nothing hit) or 'void'.
+route('POST', '/api/admin/props/grade', { auth: 'admin' }, (req, res, { body }) => {
+  const list = (Array.isArray(body.results) ? body.results : []).slice(0, 500);
+  let graded = 0;
+  tx(() => { for (const r of list) graded += bets.settleCustomProp(Number(r.id), String(r.winner || '')).graded; });
+  return { graded, props: list.length };
+});
+
+// Delete every prop in a group that nobody has bet on (to redo a paste that came out wrong).
+route('POST', '/api/admin/props/delete-unbet', { auth: 'admin' }, (req, res, { body }) => {
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map(Number).filter(Number.isFinite).slice(0, 500);
+  let deleted = 0;
+  tx(() => {
+    for (const id of ids) {
+      if (db.prepare('SELECT 1 FROM bet_legs WHERE prop_id = ?').get(id)) continue;
+      deleted += db.prepare('DELETE FROM custom_props WHERE id = ?').run(id).changes;
+    }
+  });
+  return { deleted };
+});
+
+// Feed props for one game only (when they're off for everything else, to save requests).
+route('GET', '/api/admin/props/feed', { auth: 'admin' }, () => ({
+  all: getSetting('props_enabled') === '1', events: [...props.feedEvents()], live: odds.isLive(), odds: odds.status(),
+}));
+route('POST', '/api/admin/props/feed', { auth: 'admin' }, (req, res, { body }) => {
+  const ids = props.feedEvents();
+  const id = String(body.eventId || '');
+  if (!id) throw new UserError('Pick a game.');
+  if (body.on) ids.add(id); else ids.delete(id);
+  setSetting('props_events', [...ids].slice(-50).join(','));
+  return { events: [...ids] };
 });
 
 route('PATCH', '/api/admin/props/:id', { auth: 'admin' }, (req, res, { params, body }) => {
