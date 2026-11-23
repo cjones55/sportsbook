@@ -41,8 +41,15 @@ const TITLES = {
   player_goals: 'Goals', player_shots_on_goal: 'Shots on Goal', player_goal_scorer_anytime: 'Anytime Goal',
 };
 
-function feedPropsOn(sportKey) {
-  return !!PROP_MARKETS[sportKey] && getSetting('props_enabled') === '1';
+// Games the bookie turned feed props on for one at a time.
+function feedEvents() {
+  return new Set(String(getSetting('props_events') || '').split(',').filter(Boolean));
+}
+
+// With no eventId: whether feed props are on for the whole sport.
+function feedPropsOn(sportKey, eventId) {
+  if (!PROP_MARKETS[sportKey]) return false;
+  return getSetting('props_enabled') === '1' || (eventId != null && feedEvents().has(eventId));
 }
 
 // ---------- feed props ----------
@@ -50,7 +57,7 @@ function feedPropsOn(sportKey) {
 const inflight = new Map();
 
 async function feedProps(sportKey, eventId) {
-  if (!feedPropsOn(sportKey)) return null;
+  if (!feedPropsOn(sportKey, eventId)) return null;
   // Only games that are on the board, so nobody can spend the quota on made-up ids.
   const event = (await odds.getEvents(sportKey)).events.find(e => e.id === eventId);
   if (!event) return null;
@@ -205,7 +212,7 @@ function customView(p) {
   return {
     id: p.id, eventId: p.event_id, sportKey: p.sport_key, sportTitle: p.sport_title, homeTeam: p.home_team, awayTeam: p.away_team,
     commenceTime: p.commence_time, question: p.question, options: JSON.parse(p.options), status: p.status, result: p.result,
-    createdAt: p.created_at,
+    category: p.category || null, createdAt: p.created_at,
   };
 }
 
@@ -267,4 +274,4 @@ async function resolveLeg(l) {
   return { leg: { event, market: l.market, selection: out.name, point: out.point, price: out.price, description: isAlt(l.market) ? null : out.description, propName: mk.title, propId: null } };
 }
 
-module.exports = { isProp, isAlt, isFeedMarket, baseMarket, ALT_MARKETS, PROP_MARKETS, feedPropsOn, forEvent, openCustom, eventsWithCustom, hasSpecials, customView, resolveLeg, _demoMarkets: demoMarkets };
+module.exports = { feedEvents, isProp, isAlt, isFeedMarket, baseMarket, ALT_MARKETS, PROP_MARKETS, feedPropsOn, forEvent, openCustom, eventsWithCustom, hasSpecials, customView, resolveLeg, _demoMarkets: demoMarkets };

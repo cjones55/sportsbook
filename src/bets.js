@@ -403,17 +403,19 @@ function settleCustomProp(propId, winner) {
   const prop = db.prepare('SELECT * FROM custom_props WHERE id = ?').get(propId);
   if (!prop) throw new UserError('Prop not found.', 404);
   const options = JSON.parse(prop.options).map(o => o.name);
-  if (!['void', 'pending'].includes(winner) && !options.includes(winner)) throw new UserError('Pick the option that won.');
+  if (winner === 'none' && options.includes('No')) winner = 'No';
+  // 'none': nothing on the prop hit (the player didn't score), so every pick loses.
+  if (!['void', 'pending', 'none'].includes(winner) && !options.includes(winner)) throw new UserError('Pick the option that won.');
   let graded = 0;
   tx(() => {
     for (const leg of db.prepare('SELECT * FROM bet_legs WHERE prop_id = ?').all(propId)) {
       const status = winner === 'void' || winner === 'pending' ? winner : leg.selection === winner ? 'won' : 'lost';
       if (leg.status === status) continue;
-      settleLeg(leg.id, status, { by: 'admin', note: winner === 'pending' ? null : `Result: ${winner === 'void' ? 'void' : winner}` });
+      settleLeg(leg.id, status, { by: 'admin', note: winner === 'pending' ? null : `Result: ${winner === 'none' ? 'No' : winner}` });
       graded++;
     }
     db.prepare('UPDATE custom_props SET status = ?, result = ? WHERE id = ?')
-      .run(winner === 'pending' ? 'closed' : 'settled', winner === 'pending' ? null : winner, propId);
+      .run(winner === 'pending' ? 'closed' : 'settled', winner === 'pending' ? null : winner === 'none' ? 'No' : winner, propId);
   });
   return { graded };
 }
